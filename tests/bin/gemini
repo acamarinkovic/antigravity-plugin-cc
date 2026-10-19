@@ -1,0 +1,19 @@
+#!/usr/bin/env node
+const fs = require("fs");
+const args = process.argv.slice(2);
+const stdin = fs.readFileSync(0, "utf8");
+if (process.env.FAKE_LOG) fs.appendFileSync(process.env.FAKE_LOG, JSON.stringify({ bin: "gemini", args, stdin }) + "\n");
+if (process.env.FAKE_MODE === "untrusted") {
+  process.stderr.write("Gemini CLI is not running in a trusted directory.\n");
+  process.exit(55);
+}
+const delay = Number(process.env.FAKE_DELAY_MS || 0);
+if (delay) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+if (process.env.FAKE_MODE === "auth") {
+  process.stderr.write("[STARTUP] noise\n" + JSON.stringify({ session_id: "s-1", error: { type: "Error", message: "Invalid auth method selected.", code: 41 } }, null, 2) + "\n");
+  process.exit(41);
+}
+const response = args.includes("plan") && stdin.includes("JSON schema")
+  ? "```json\n" + JSON.stringify({ verdict: "approve", summary: "Looks fine.", findings: [], next_steps: [] }) + "\n```"
+  : `gemini says: ${stdin.slice(0, 30)}`;
+process.stdout.write(JSON.stringify({ session_id: "gem-session-1", response, stats: { models: { "gemini-3.1-pro-preview": {} } } }, null, 2));

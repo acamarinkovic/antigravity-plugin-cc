@@ -1,0 +1,8 @@
+{
+  "name": "antigravity",
+  "version": "0.1.0",
+  "description": "Ask Google Antigravity (Gemini 4 Argon and other models) for second opinions, reviews and delegated tasks from Claude Code.",
+  "author": { "name": "Aleksandar Marinkovic" },
+  "license": "MIT",
+  "keywords": ["antigravity", "gemini", "agy", "code-review", "second-opinion"]
+}

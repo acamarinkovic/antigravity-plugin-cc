@@ -1,0 +1,39 @@
+#!/usr/bin/env node
+const fs = require("fs");
+const args = process.argv.slice(2);
+const log = process.env.FAKE_LOG;
+if (log) fs.appendFileSync(log, JSON.stringify({ bin: "agy", args, cwd: process.cwd() }) + "\n");
+const mode = process.env.FAKE_MODE || "ok";
+const delay = Number(process.env.FAKE_DELAY_MS || 0);
+const conv = args.includes("--conversation") ? args[args.indexOf("--conversation") + 1] : "conv-" + Date.now();
+const prompt = args[args.indexOf("-p") + 1] || "";
+setTimeout(() => {
+  if (mode === "error") {
+    process.stderr.write("error: invalid model selection\n");
+    process.stdout.write(JSON.stringify({ conversation_id: "", status: "ERROR", error: "invalid model selection: nope" }));
+    process.exit(1);
+  }
+  if (mode === "timeout") process.stderr.write("[agy] print timeout after 5s with turn in progress; returning partial output\n");
+  const out = { conversation_id: conv, status: "SUCCESS", response: process.env.FAKE_RESPONSE || `answer to: ${prompt.split("\n\n").pop().slice(0, 40)}`, duration_seconds: 1, num_turns: 1 };
+  if (mode === "denied") out.denied_actions = [{ action: "command", display_name: "RunCommand" }];
+  if ((mode === "denied-once" && !args.includes("--conversation")) || mode === "denied-always" || mode === "denied-empty-structured") {
+    out.response = "";
+    out.denied_actions = [{ action: "command", display_name: "RunCommand" }];
+  }
+  if (args.includes("--json-schema")) {
+    out.structured_output = { verdict: "needs-attention", summary: "Do not ship.", findings: [
+      { severity: "low", title: "Minor", body: "small", file: "a.py", line_start: 1, line_end: 1, confidence: 0.3, recommendation: "fix" },
+      { severity: "critical", title: "Divides by zero", body: "len-1 is 0 for one item", file: "a.py", line_start: 2, line_end: 2, confidence: 0.9, recommendation: "use len(xs)" }
+    ], next_steps: ["Fix the divisor"] };
+  }
+  if (mode === "denied-empty-structured") out.structured_output = out.structured_output || { verdict: "approve", summary: "ok", findings: [], next_steps: [] };
+  if (mode === "retry-crash" && args.includes("--conversation")) {
+    process.stdout.write(JSON.stringify({ conversation_id: "", status: "ERROR", error: "boom" }));
+    process.exit(1);
+  }
+  if (mode === "retry-crash") {
+    out.response = "";
+    out.denied_actions = [{ action: "command", display_name: "RunCommand" }];
+  }
+  process.stdout.write(JSON.stringify(out));
+}, delay);

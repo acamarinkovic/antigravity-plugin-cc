@@ -1,0 +1,11 @@
+{
+  "name": "antigravity-plugin-cc",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Claude Code plugin that asks Google Antigravity (agy) or Gemini CLI for second opinions, reviews and delegated tasks.",
+  "license": "MIT",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "test": "node --test tests/companion.test.mjs"
+  }
+}

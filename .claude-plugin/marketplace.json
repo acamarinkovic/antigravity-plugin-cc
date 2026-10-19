@@ -1,0 +1,17 @@
+{
+  "name": "antigravity-cc",
+  "owner": { "name": "Aleksandar Marinkovic" },
+  "metadata": {
+    "description": "Use Google Antigravity (agy) and Gemini CLI from Claude Code for second opinions, code review and delegated tasks.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "antigravity",
+      "description": "Ask Google Antigravity (Gemini 4 Argon and other models) for second opinions, reviews and delegated tasks from Claude Code.",
+      "version": "0.1.0",
+      "author": { "name": "Aleksandar Marinkovic" },
+      "source": "./plugins/antigravity"
+    }
+  ]
+}
