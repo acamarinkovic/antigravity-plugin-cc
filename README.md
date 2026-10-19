@@ -14,7 +14,7 @@ This is an unofficial community plugin. It is not affiliated with or endorsed by
 ## Install
 
 ```bash
-claude plugin marketplace add <path-or-git-url-of-this-repo>
+claude plugin marketplace add acamarinkovic/antigravity-plugin-cc
 claude plugin install antigravity@antigravity-cc
 ```
 
