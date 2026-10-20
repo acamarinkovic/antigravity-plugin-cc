@@ -1,5 +1,5 @@
 ---
-description: Ask Google Antigravity (Gemini 4 Argon by default) what it thinks — read-only second opinion
+description: Ask Google Antigravity what it thinks — read-only second opinion, using your saved or chosen model
 argument-hint: "[--background] [--resume|--fresh] [--backend agy|gemini] [--model <id>] [--effort low|medium|high|xhigh|max] <question>"
 allowed-tools: Bash(node:*)
 ---

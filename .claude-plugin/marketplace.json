@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "antigravity",
-      "description": "Ask Google Antigravity (Gemini 4 Argon and other models) for second opinions, reviews and delegated tasks from Claude Code.",
+      "description": "Ask Google Antigravity (any model your account offers, such as Gemini 4 Argon) for second opinions, reviews and delegated tasks from Claude Code.",
       "version": "0.1.0",
       "author": { "name": "Aleksandar Marinkovic" },
       "source": "./plugins/antigravity"

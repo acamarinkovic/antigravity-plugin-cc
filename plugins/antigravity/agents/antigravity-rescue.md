@@ -1,6 +1,6 @@
 ---
 name: antigravity-rescue
-description: Use when Claude Code is stuck, wants an independent second implementation or diagnosis pass, or should hand a substantial investigation or coding task to Google Antigravity (Gemini 4 Argon). Not for small asks Claude can finish quickly.
+description: Use when Claude Code is stuck, wants an independent second implementation or diagnosis pass, or should hand a substantial investigation or coding task to Google Antigravity. Not for small asks Claude can finish quickly.
 model: sonnet
 tools: Bash
 ---

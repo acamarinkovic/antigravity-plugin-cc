@@ -113,10 +113,17 @@ function workspaceRoot(cwd) {
   return top ? top.trim() : cwd;
 }
 
-function stateDir(root) {
+function dataRoot() {
   const configDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
-  const data = process.env[DATA_ENV] || path.join(configDir, "plugins", "data", "antigravity-antigravity-cc");
-  const base = path.join(data, "state");
+  return process.env[DATA_ENV] || path.join(configDir, "plugins", "data", "antigravity-antigravity-cc");
+}
+
+function defaultsFile() {
+  return path.join(dataRoot(), "defaults.json");
+}
+
+function stateDir(root) {
+  const base = path.join(dataRoot(), "state");
   let real = root;
   try {
     real = fs.realpathSync(root);
@@ -164,6 +171,22 @@ function jobFile(dir, id) {
 
 function logFile(dir, id) {
   return path.join(jobsDir(dir), `${id}.log`);
+}
+
+function agyLogFile(dir, id) {
+  return path.join(jobsDir(dir), `${id}.agy.log`);
+}
+
+function takeModelLabel(file) {
+  let text = "";
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+  fs.rmSync(file, { force: true });
+  const labels = [...text.matchAll(/selected model override[^\n]*?label="([^"]+)"/g)];
+  return labels.length ? labels[labels.length - 1][1] : null;
 }
 
 function saveJob(dir, job) {
@@ -217,7 +240,7 @@ function pruneJobs(dir) {
   const jobs = listJobs(dir);
   for (const job of jobs.slice(MAX_JOBS)) {
     if (isActive(job)) continue;
-    for (const f of [jobFile(dir, job.id), logFile(dir, job.id), path.join(dir, "inputs", `${job.id}.md`)]) {
+    for (const f of [jobFile(dir, job.id), logFile(dir, job.id), agyLogFile(dir, job.id), path.join(dir, "inputs", `${job.id}.md`)]) {
       fs.rmSync(f, { force: true });
     }
   }
@@ -261,11 +284,14 @@ function binaryFor(backend) {
 function resolveModel(backend, model, effort) {
   if (backend === "gemini") {
     if (effort) fail("--effort is only supported by the agy backend.");
-    return model || process.env.ANTIGRAVITY_COMPANION_GEMINI_MODEL || "";
+    return { model: model || process.env.ANTIGRAVITY_COMPANION_GEMINI_MODEL || "", effort: null };
   }
   if (effort && !AGY_EFFORTS.includes(effort)) fail(`--effort must be one of: ${AGY_EFFORTS.join(", ")}.`);
-  const chosen = model || process.env.ANTIGRAVITY_COMPANION_MODEL || "gemini-4-argon-high";
-  return effort ? chosen.replace(new RegExp(`-(${AGY_EFFORTS.join("|")})$`), "") : chosen;
+  const saved = readJson(defaultsFile(), {});
+  const chosen = model || process.env.ANTIGRAVITY_COMPANION_MODEL || saved.model || "";
+  const suffix = new RegExp(`-(${AGY_EFFORTS.join("|")})$`);
+  const level = effort || (suffix.test(chosen) ? null : process.env.ANTIGRAVITY_COMPANION_EFFORT || saved.effort || null);
+  return { model: level ? chosen.replace(suffix, "") : chosen, effort: level };
 }
 
 function fileInputNote(file) {
@@ -292,6 +318,7 @@ function buildInvocation(job, dir) {
     if (req.resume) args.push("--conversation", req.resume);
     for (const d of addDirs) args.push("--add-dir", d);
     if (req.schema) args.push("--json-schema", req.schema);
+    args.push("--log-file", agyLogFile(dir, job.id));
     return { bin, args, stdin: null };
   }
   let prompt = req.prompt;
@@ -440,6 +467,7 @@ function runBackend(job, dir) {
     process.once("SIGTERM", stop);
     process.once("SIGINT", stop);
     let pending = "";
+    let initModel = null;
     const seen = new Set();
     child.stdout.on("data", (b) => {
       stdout += b;
@@ -454,6 +482,7 @@ function runBackend(job, dir) {
         } catch {
           continue;
         }
+        if (d.event === "init" && d.init?.model) initModel = d.init.model;
         const su = d.event === "step_update" ? d.step_update : null;
         if (!su || seen.has(su.step_index) || su.tool_name === "finish") continue;
         if (su.step_type === "tool") {
@@ -474,6 +503,7 @@ function runBackend(job, dir) {
     });
     child.on("close", (code, signal) => {
       clearTimeout(timer);
+      const label = job.backend === "agy" ? takeModelLabel(agyLogFile(dir, job.id)) : null;
       process.removeListener("SIGTERM", stop);
       process.removeListener("SIGINT", stop);
       fs.closeSync(log);
@@ -485,7 +515,10 @@ function runBackend(job, dir) {
         resolve({ ok: false, signal, error: `${inv.bin} was stopped (${signal}).` });
         return;
       }
-      resolve(job.backend === "agy" ? parseAgyStream(stdout, stderr, code) : parseGemini(stdout, stderr, code));
+      if (job.backend !== "agy") return resolve(parseGemini(stdout, stderr, code));
+      const parsed = parseAgyStream(stdout, stderr, code);
+      if (parsed.ok || parsed.text) parsed.model = label || initModel || undefined;
+      resolve(parsed);
     });
     child.stdin.on("error", () => {});
     child.stdin.end(inv.stdin ?? "");
@@ -494,7 +527,9 @@ function runBackend(job, dir) {
 
 function backendLabel(job) {
   const name = job.backend === "agy" ? "Antigravity" : "Gemini CLI";
-  const model = job.result?.model || job.model || "default model";
+  const label = job.result?.model;
+  if (label && /\(/.test(label)) return `${name} · ${label}${job.effort && !label.toLowerCase().includes(job.effort) ? ` · effort ${job.effort} requested` : ""}`;
+  const model = label || job.model || "account default model";
   return `${name} · ${model}${job.effort ? ` · effort ${job.effort}` : ""}`;
 }
 
@@ -706,15 +741,15 @@ async function cmdTask(args) {
     if (!resume) fail("Provide a question or task.");
     prompt = "Continue from where we left off. Pick the most valuable next step and finish it.";
   }
-  const effort = opts.effort || null;
+  const choice = resolveModel(backend, opts.model, opts.effort || null);
   if (opts.timeout) durationMs(opts.timeout);
   const { job } = createJob(cwd, {
     kind: "task",
     title: `${backend === "agy" ? "Antigravity" : "Gemini"} ${opts.write ? "task" : "question"}`,
     summary: prompt.replace(/\s+/g, " ").slice(0, 80),
     backend,
-    model: resolveModel(backend, opts.model, effort),
-    effort,
+    model: choice.model,
+    effort: choice.effort,
     write: Boolean(opts.write),
     request: { prompt, resume, timeout: opts.timeout || JOB_TIMEOUT }
   });
@@ -780,9 +815,7 @@ function fillTemplate(name, values) {
 }
 
 async function cmdReview(kind, argv) {
-  const args = argv.includes("--args-stdin")
-    ? [...splitArgs([fs.readFileSync(0, "utf8").trim()]), ...argv.filter((a) => a !== "--args-stdin")]
-    : splitArgs(argv);
+  const args = argsFrom(argv);
   const { opts, rest } = parseFlags(args, {
     flags: ["background", "wait"],
     values: ["backend", "model", "effort", "base", "scope", "timeout"],
@@ -796,7 +829,7 @@ async function cmdReview(kind, argv) {
     return;
   }
   const backend = resolveBackend(opts.backend);
-  const effort = opts.effort || null;
+  const choice = resolveModel(backend, opts.model, opts.effort || null);
   const focus = rest.join(" ").trim() || "No extra focus provided.";
   const prompt = fillTemplate(kind, { TARGET: target.label, FOCUS: focus, INPUT: target.diff });
   if (opts.timeout) durationMs(opts.timeout);
@@ -806,8 +839,8 @@ async function cmdReview(kind, argv) {
     summary: `${target.label}${rest.length ? ` · focus: ${focus.slice(0, 60)}` : ""}`,
     target: target.label,
     backend,
-    model: resolveModel(backend, opts.model, effort),
-    effort,
+    model: choice.model,
+    effort: choice.effort,
     write: false,
     request: {
       prompt,
@@ -926,11 +959,19 @@ function checkAgy() {
   }
   const version = spawnSync(found, ["--version"], { encoding: "utf8", timeout: 15000 }).stdout?.trim();
   const models = spawnSync(found, ["models"], { encoding: "utf8", timeout: 30000, input: "" });
-  const ids = (models.stdout || "").split("\n").map((l) => l.split("\t")[0].trim()).filter((l) => /^[a-z0-9][a-z0-9.-]+$/.test(l));
-  if (models.status !== 0 || ids.length === 0) {
-    return { ready: false, path: found, version, detail: "installed but not signed in", next: "Run `! agy` once and complete the Google sign-in, then rerun /antigravity:setup." };
+  const rows = (models.stdout || "").split("\n").map((l) => l.split("\t").map((c) => c.trim())).filter(([id]) => /^[a-z0-9][a-z0-9.-]+$/.test(id || ""));
+  if (models.status !== 0 || rows.length === 0) {
+    return { ready: false, path: found, version, detail: "installed but not signed in", next: "Run `agy` once in a terminal and complete the Google sign-in, then rerun /antigravity:setup." };
   }
-  return { ready: true, path: found, version, models: ids, detail: `signed in, ${ids.length} models` };
+  const suffix = new RegExp(`-(${AGY_EFFORTS.join("|")})$`);
+  const families = [];
+  for (const [id, label = id] of rows) {
+    const base = id.replace(suffix, "");
+    let fam = families.find((f) => f.model === base);
+    if (!fam) families.push((fam = { model: base, name: label.replace(/\s*\([^)]*\)\s*$/, ""), efforts: [] }));
+    if (base !== id) fam.efforts.push(id.slice(base.length + 1));
+  }
+  return { ready: true, path: found, version, models: rows.map(([id]) => id), families, detail: `signed in, ${rows.length} models` };
 }
 
 function checkGemini() {
@@ -953,8 +994,13 @@ function checkGemini() {
 }
 
 function cmdSetup(args) {
-  const { opts } = parseFlags(splitArgs(args), { flags: ["json", "enable-review-gate", "disable-review-gate"], anywhere: true });
+  const { opts } = parseFlags(argsFrom(args), {
+    flags: ["json", "enable-review-gate", "disable-review-gate", "reset-defaults"],
+    values: ["model", "effort"],
+    anywhere: true
+  });
   if (opts["enable-review-gate"] && opts["disable-review-gate"]) fail("Choose only one of --enable-review-gate and --disable-review-gate.");
+  if (opts.effort && !AGY_EFFORTS.includes(opts.effort)) fail(`--effort must be one of: ${AGY_EFFORTS.join(", ")}.`);
   const dir = stateDir(workspaceRoot(process.cwd()));
   const config = loadConfig(dir);
   const actions = [];
@@ -965,25 +1011,63 @@ function cmdSetup(args) {
   }
   const agy = checkAgy();
   const gemini = checkGemini();
+  if (opts["reset-defaults"]) {
+    fs.rmSync(defaultsFile(), { force: true });
+    actions.push("Saved model and effort defaults removed; agy's own account default is used.");
+  }
+  if (opts.model || opts.effort) {
+    if (!agy.ready) fail("agy is not ready, so the model cannot be checked. Fix the agy setup first.");
+    const saved = readJson(defaultsFile(), {});
+    let effort = opts.effort || null;
+    let family;
+    if (opts.model) {
+      family = agy.families.find((f) => f.model === opts.model) || agy.families.find((f) => f.efforts.some((e) => `${f.model}-${e}` === opts.model));
+      if (!family) fail(`Model "${opts.model}" is not available on this Antigravity account. Available: ${agy.families.map((f) => f.model).join(", ")}.`);
+      if (family.model !== opts.model) {
+        const implied = opts.model.slice(family.model.length + 1);
+        if (effort && effort !== implied) fail(`"${opts.model}" already means effort ${implied}. Use --model ${family.model} --effort ${effort} instead.`);
+        effort = effort || implied;
+      } else if (!effort && family.efforts.includes(saved.effort)) {
+        effort = saved.effort;
+      }
+    } else {
+      family = agy.families.find((f) => f.model === saved.model);
+      if (!family) fail("Save a model first (--model <family> --effort <level>), or pick one with --choose.");
+    }
+    if (effort && !family.efforts.includes(effort)) {
+      fail(`${family.model} has no "${effort}" effort ${family.efforts.length ? `(available: ${family.efforts.join(", ")})` : "(it has no effort levels)"}.`);
+    }
+    writeJson(defaultsFile(), effort ? { model: family.model, effort } : { model: family.model });
+    actions.push(`Saved default for all projects: ${family.model}${effort ? ` · effort ${effort}` : ""}.`);
+  }
+  const savedNow = readJson(defaultsFile(), {});
+  const savedFamily = agy.families?.find((f) => f.model === savedNow.model);
+  const staleDefault = agy.ready && savedNow.model && (!savedFamily || (savedNow.effort && !savedFamily.efforts.includes(savedNow.effort)));
+  const choice = resolveModel("agy", null, null);
   const report = {
     ready: agy.ready || gemini.ready,
     node: process.version,
     agy,
     gemini,
     defaultBackend: resolveBackend(),
-    defaultModel: resolveModel("agy", null, null),
+    defaultModel: choice.model || null,
+    defaultEffort: choice.effort,
     stopReviewGate: config.stopReviewGate,
     actions,
-    nextSteps: [agy.next, gemini.next].filter(Boolean)
+    nextSteps: [
+      staleDefault ? `The saved default ${savedNow.model}${savedNow.effort ? ` · effort ${savedNow.effort}` : ""} is not available on this account any more; run /antigravity:setup --choose or --reset-defaults.` : null,
+      agy.next,
+      gemini.next
+    ].filter(Boolean)
   };
   if (opts.json) return void process.stdout.write(JSON.stringify(report, null, 2) + "\n");
-  const argon = agy.models ? agy.models.filter((m) => m.startsWith("gemini-4")).join(", ") : "";
   const out = [
     `Antigravity companion: ${report.ready ? "ready" : "not ready"}`,
     `- Node ${report.node}`,
-    `- agy: ${agy.detail}${agy.version ? ` (v${agy.version})` : ""}${argon ? ` · ${argon}` : ""}`,
+    `- agy: ${agy.detail}${agy.version ? ` (v${agy.version})` : ""}`,
+    ...(agy.families || []).map((f) => `    ${f.model}${f.efforts.length ? ` (effort: ${f.efforts.join(", ")})` : ""} — ${f.name}`),
     `- gemini: ${gemini.detail}${gemini.version ? ` (v${gemini.version})` : ""}`,
-    `- Default: ${report.defaultBackend} · ${report.defaultModel}`,
+    `- Default for all projects: ${report.defaultBackend} · ${report.defaultModel || "agy account default model"}${report.defaultEffort ? ` · effort ${report.defaultEffort}` : ""}`,
     `- Stop review gate: ${config.stopReviewGate ? "on" : "off"}`,
     ...actions.map((a) => `- ${a}`)
   ];
@@ -1066,8 +1150,7 @@ async function hookStop() {
     summary: "Stop-time review of the last Claude turn",
     target: target.label,
     backend,
-    model: resolveModel(backend, null, null),
-    effort: null,
+    ...resolveModel(backend, null, null),
     write: false,
     request: {
       prompt: fillTemplate("stop-review-gate", { CLAUDE_MESSAGE: input.last_assistant_message || "(not provided)", INPUT: target.diff }),
@@ -1116,6 +1199,12 @@ async function main() {
     default:
       fail("Usage: companion.mjs <task|review|adversarial-review|status|result|cancel|setup> [options]");
   }
+}
+
+function argsFrom(argv) {
+  return argv.includes("--args-stdin")
+    ? [...splitArgs([fs.readFileSync(0, "utf8").trim()]), ...argv.filter((a) => a !== "--args-stdin")]
+    : splitArgs(argv);
 }
 
 function plainLinks(text) {

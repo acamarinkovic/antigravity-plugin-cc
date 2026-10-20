@@ -1,6 +1,6 @@
 # Antigravity for Claude Code
 
-Ask Google Antigravity what it thinks without leaving Claude Code. Get a second opinion, a structured code review, an adversarial review, or hand a whole task over, using the models that come with your Antigravity account (Gemini 4 Argon by default). Antigravity runs on your own sign-in, so no API key is needed and no extra API tokens are billed.
+Ask Google Antigravity what it thinks without leaving Claude Code. Get a second opinion, a structured code review, an adversarial review, or hand a whole task over, using whichever models your Antigravity account offers (for example Gemini 4 Argon, Gemini Flash or Claude models). Antigravity runs on your own sign-in, so no API key is needed and no extra API tokens are billed.
 
 This is an unofficial community plugin. It is not affiliated with or endorsed by Google or Anthropic. It drives the `agy` CLI that ships with Antigravity, and can optionally use Gemini CLI as a second backend.
 
@@ -18,7 +18,19 @@ claude plugin marketplace add acamarinkovic/antigravity-plugin-cc
 claude plugin install antigravity@antigravity-cc
 ```
 
-Then run `/antigravity:setup` in Claude Code. It reports whether `agy` and `gemini` are installed and signed in, and which Gemini 4 models your account can use.
+Then run `/antigravity:setup` in Claude Code. It reports whether `agy` and `gemini` are installed and signed in, and lists the models your account can use.
+
+### Choose your default model and thinking level
+
+Accounts differ, so nothing is hard-coded: until you choose, the plugin lets `agy` use your account's default model. To set a default for all projects:
+
+```text
+/antigravity:setup --choose                              # pick from your account's models interactively
+/antigravity:setup --model gemini-4-argon --effort high  # or set it directly
+/antigravity:setup --reset-defaults                      # back to agy's account default
+```
+
+`setup` checks the model against `agy models` before saving it. `--model` and `--effort` on a single command still override the saved default. Every answer ends with the model that actually ran.
 
 ## Commands
 
@@ -37,7 +49,7 @@ Common options (they go before the question or focus text):
 
 - `--background` runs detached; follow it with `status` and `result`.
 - `--resume` continues the last Antigravity conversation of this Claude session; `--fresh` starts a new one.
-- `--model <id>` picks a model. Run `agy models` to see the list, e.g. `gemini-4-argon-high`, `gemini-3.8-flash-medium`, `claude-opus-5-5-high`.
+- `--model <id>` picks a model for this command, as a family (`gemini-4-argon`) or a full id with a level (`gemini-4-argon-high`). `/antigravity:setup` lists what your account has.
 - `--effort low|medium|high|xhigh|max` (agy only) sets reasoning effort and overrides the effort suffix of the model id.
 - `--backend agy|gemini` selects the CLI.
 - For reviews: `--base <ref>` and `--scope auto|working-tree|branch`.
@@ -76,7 +88,7 @@ The gate runs once per stop: the follow-up stop after a block is allowed through
 | Environment variable | Default | Meaning |
 |---|---|---|
 | `ANTIGRAVITY_COMPANION_BACKEND` | `agy` | Default backend |
-| `ANTIGRAVITY_COMPANION_MODEL` | `gemini-4-argon-high` | Default agy model |
+| `ANTIGRAVITY_COMPANION_MODEL`, `ANTIGRAVITY_COMPANION_EFFORT` | saved setup default, else agy's account default | Override the default agy model / thinking level |
 | `ANTIGRAVITY_COMPANION_GEMINI_MODEL` | Gemini CLI default | Default Gemini CLI model |
 | `ANTIGRAVITY_AGY_BIN`, `ANTIGRAVITY_GEMINI_BIN` | `agy`, `gemini` | Binary paths |
 | `ANTIGRAVITY_COMPANION_WAIT_MS` | `540000` | How long a foreground command or `status --wait` waits before handing back (capped at 570000, below the 10-minute Bash limit) |

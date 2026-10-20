@@ -3,7 +3,20 @@ const fs = require("fs");
 const args = process.argv.slice(2);
 const log = process.env.FAKE_LOG;
 if (log) fs.appendFileSync(log, JSON.stringify({ bin: "agy", args, cwd: process.cwd() }) + "\n");
+if (args[0] === "--version") {
+  process.stdout.write("1.0.0\n");
+  process.exit(0);
+}
+if (args[0] === "models") {
+  process.stdout.write("Fetching available models...\nflash-x-high\tFlash X (High)\nflash-x-low\tFlash X (Low)\npro-y-medium\tPro Y (Medium)\nsolo-z\tSolo Z\n");
+  process.exit(0);
+}
 const mode = process.env.FAKE_MODE || "ok";
+if (args.includes("--log-file") && mode !== "no-label") {
+  const chosen = args.includes("--model") ? args[args.indexOf("--model") + 1] : "Account Default";
+  const level = args.includes("--effort") ? args[args.indexOf("--effort") + 1] : "Label";
+  fs.writeFileSync(args[args.indexOf("--log-file") + 1], `I1 model_config_manager.go:340] Propagating selected model override to backend: label="${chosen} (${level})"\n`);
+}
 const delay = Number(process.env.FAKE_DELAY_MS || 0);
 const conv = args.includes("--conversation") ? args[args.indexOf("--conversation") + 1] : "conv-" + Date.now();
 const prompt = args[args.indexOf("-p") + 1] || "";
@@ -40,7 +53,7 @@ setTimeout(() => {
   }
   if (args.includes("stream-json") && mode !== "error") {
     const lines = [
-      { event: "init", conversation_id: conv, init: { model: "fake" } },
+      { event: "init", conversation_id: conv, init: { model: args.includes("--model") ? args[args.indexOf("--model") + 1] : "account-default-model" } },
       { event: "step_update", step_update: { step_index: 1, state: "ACTIVE", step_type: "tool", tool_name: "read_file", tool_info: { parameters: { Path: process.cwd() + "/a.py" } } } },
       { event: "step_update", step_update: { step_index: 1, state: "DONE", step_type: "tool", tool_name: "read_file", tool_info: { parameters: { Path: process.cwd() + "/a.py" } } } },
       { event: "step_update", step_update: { step_index: 2, state: "ACTIVE", step_type: "agent_response" } },

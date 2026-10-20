@@ -39,7 +39,7 @@ function run(box, args, extraEnv = {}, input = "") {
 }
 
 function calls(box) {
-  return fs.existsSync(box.log) ? fs.readFileSync(box.log, "utf8").trim().split("\n").map((l) => JSON.parse(l)) : [];
+  return fs.existsSync(box.log) ? fs.readFileSync(box.log, "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((c) => c.args.includes("-p")) : [];
 }
 
 function flag(args, name) {
@@ -56,23 +56,24 @@ function waitFor(predicate, ms = 10000) {
   return false;
 }
 
-test("read-only question uses plan mode, sandbox and Gemini 4 Argon High by default", () => {
+test("read-only question uses plan mode and sandbox, and leaves the model to agy when nothing is saved", () => {
   const box = sandbox();
   const r = run(box, ["task", "--", "what is it?"]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /answer to: what is it\?/);
-  assert.match(r.stdout, /Antigravity · gemini-4-argon-high/);
+  assert.match(r.stdout, /Antigravity · Account Default \(Label\)/);
   const [c] = calls(box);
   assert.equal(flag(c.args, "--mode"), "plan");
   assert.ok(c.args.includes("--sandbox"));
-  assert.equal(flag(c.args, "--model"), "gemini-4-argon-high");
+  assert.equal(flag(c.args, "--model"), undefined);
+  assert.equal(flag(c.args, "--effort"), undefined);
   assert.equal(flag(c.args, "--output-format"), "stream-json");
   assert.equal(flag(c.args, "--print-timeout"), "60m");
 });
 
 test("--write switches to accept-edits and --effort strips the model effort suffix", () => {
   const box = sandbox();
-  const r = run(box, ["task", "--write", "--effort", "max", "--", "fix it"]);
+  const r = run(box, ["task", "--write", "--model", "gemini-4-argon-high", "--effort", "max", "--", "fix it"]);
   assert.equal(r.status, 0, r.stderr);
   const [c] = calls(box);
   assert.equal(flag(c.args, "--mode"), "accept-edits");
@@ -459,4 +460,106 @@ test("interrupting status --wait cancels the running job", async () => {
   waiter.kill("SIGINT");
   await new Promise((res) => waiter.on("close", res));
   assert.match(run(box, ["status", id]).stdout, /Status: cancelled/);
+});
+
+test("setup saves a model and effort for all projects, and runs use them", () => {
+  const box = sandbox();
+  const r = run(box, ["setup", "--model flash-x --effort high"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /Saved default for all projects: flash-x · effort high/);
+  assert.match(r.stdout, /flash-x \(effort: high, low\) — Flash X/);
+  assert.match(r.stdout, /solo-z — Solo Z/);
+  run(box, ["task", "--", "x"]);
+  const [c] = calls(box);
+  assert.equal(flag(c.args, "--model"), "flash-x");
+  assert.equal(flag(c.args, "--effort"), "high");
+  const other = path.join(box.root, "other-repo");
+  fs.mkdirSync(other);
+  spawnSync(process.execPath, [SCRIPT, "task", "--", "y"], { cwd: other, env: { ...process.env, ANTIGRAVITY_COMPANION_DATA: box.data, ANTIGRAVITY_AGY_BIN: path.join(BIN, "agy"), FAKE_LOG: box.log } });
+  assert.equal(flag(calls(box)[1].args, "--model"), "flash-x");
+});
+
+test("an explicit model with an effort suffix overrides the saved effort; explicit --effort overrides everything", () => {
+  const box = sandbox();
+  run(box, ["setup", "--model flash-x --effort high"]);
+  run(box, ["task", "--model", "pro-y-medium", "--", "x"]);
+  run(box, ["task", "--effort", "low", "--", "x"]);
+  const [a, b] = calls(box);
+  assert.equal(flag(a.args, "--model"), "pro-y-medium");
+  assert.equal(flag(a.args, "--effort"), undefined);
+  assert.equal(flag(b.args, "--model"), "flash-x");
+  assert.equal(flag(b.args, "--effort"), "low");
+});
+
+test("setup rejects a model the account does not have and lists what is available", () => {
+  const box = sandbox();
+  const r = run(box, ["setup", "--model gemini-4-argon"]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /not available on this Antigravity account\. Available: flash-x, pro-y, solo-z/);
+  assert.ok(!fs.existsSync(path.join(box.data, "defaults.json")));
+});
+
+test("setup --reset-defaults goes back to agy's account default", () => {
+  const box = sandbox();
+  run(box, ["setup", "--model pro-y-medium"]);
+  const r = run(box, ["setup", "--reset-defaults"]);
+  assert.match(r.stdout, /agy account default model/);
+  run(box, ["task", "--", "x"]);
+  assert.equal(flag(calls(box)[0].args, "--model"), undefined);
+});
+
+test("setup --json exposes model families for an interactive choice", () => {
+  const box = sandbox();
+  const report = JSON.parse(run(box, ["setup", "--json"]).stdout);
+  assert.deepEqual(report.agy.families.map((f) => f.model), ["flash-x", "pro-y", "solo-z"]);
+  assert.deepEqual(report.agy.families[0].efforts, ["high", "low"]);
+  assert.equal(report.defaultModel, null);
+});
+
+test("setup reads its options from stdin the way the command passes them", () => {
+  const box = sandbox();
+  const r = run(box, ["setup", "--args-stdin"], {}, "--model solo-z\n");
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /Saved default for all projects: solo-z\./);
+});
+
+test("the model that actually ran is read from agy's log, and the temporary log is removed", () => {
+  const box = sandbox();
+  const r = run(box, ["task", "--model", "pro-y", "--effort", "low", "--", "x"]);
+  assert.match(r.stdout, /Antigravity · pro-y \(low\)\n/);
+  const logFlag = flag(calls(box)[0].args, "--log-file");
+  assert.ok(logFlag.endsWith(".agy.log"));
+  assert.ok(!fs.existsSync(logFlag));
+  const n = run(box, ["task", "--model", "pro-y", "--effort", "low", "--", "x"], { FAKE_MODE: "no-label" });
+  assert.match(n.stdout, /Antigravity · pro-y · effort low/);
+});
+
+test("setup only saves model and effort pairs the account offers, normalized to family + effort", () => {
+  const box = sandbox();
+  assert.match(run(box, ["setup", "--model solo-z --effort high"]).stderr, /solo-z has no "high" effort \(it has no effort levels\)/);
+  assert.match(run(box, ["setup", "--model flash-x --effort medium"]).stderr, /flash-x has no "medium" effort \(available: high, low\)/);
+  assert.match(run(box, ["setup", "--model flash-x-high --effort low"]).stderr, /already means effort high/);
+  assert.ok(!fs.existsSync(path.join(box.data, "defaults.json")));
+  assert.match(run(box, ["setup", "--model flash-x-high"]).stdout, /Saved default for all projects: flash-x · effort high\./);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(box.data, "defaults.json"), "utf8")), { model: "flash-x", effort: "high" });
+  assert.match(run(box, ["setup", "--effort low"]).stdout, /Saved default for all projects: flash-x · effort low\./);
+  assert.match(run(box, ["setup", "--model pro-y"]).stdout, /Saved default for all projects: pro-y\./);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(box.data, "defaults.json"), "utf8")), { model: "pro-y" });
+});
+
+test("setup warns when the saved default is no longer offered by the account", () => {
+  const box = sandbox();
+  fs.mkdirSync(box.data, { recursive: true });
+  fs.writeFileSync(path.join(box.data, "defaults.json"), JSON.stringify({ model: "gone-model", effort: "high" }));
+  assert.match(run(box, ["setup", ""]).stdout, /saved default gone-model · effort high is not available on this account any more/);
+});
+
+test("a failed run does not claim a model, and timeouts still remove the temporary agy log", () => {
+  const box = sandbox();
+  const e = run(box, ["task", "--model", "pro-y", "--", "x"], { FAKE_MODE: "error" });
+  assert.doesNotMatch(e.stdout, /\(Label\)/);
+  const t = run(box, ["task", "--timeout", "1s", "--", "x"], { FAKE_DELAY_MS: "45000" });
+  assert.match(t.stdout, /did not finish within 1s/);
+  const logFlag = flag(calls(box)[1].args, "--log-file");
+  assert.ok(waitFor(() => !fs.existsSync(logFlag)));
 });
