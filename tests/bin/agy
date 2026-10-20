@@ -7,6 +7,9 @@ const mode = process.env.FAKE_MODE || "ok";
 const delay = Number(process.env.FAKE_DELAY_MS || 0);
 const conv = args.includes("--conversation") ? args[args.indexOf("--conversation") + 1] : "conv-" + Date.now();
 const prompt = args[args.indexOf("-p") + 1] || "";
+if (args.includes("stream-json") && Number(process.env.FAKE_DELAY_MS || 0) > 0) {
+  process.stdout.write(JSON.stringify({ event: "step_update", step_update: { step_index: 1, state: "DONE", step_type: "tool", tool_name: "view_file", tool_info: { parameters: { AbsolutePath: process.cwd() + "/a.py" } } } }) + "\n");
+}
 setTimeout(() => {
   if (mode === "error") {
     process.stderr.write("error: invalid model selection\n");
@@ -35,5 +38,17 @@ setTimeout(() => {
     out.response = "";
     out.denied_actions = [{ action: "command", display_name: "RunCommand" }];
   }
-  process.stdout.write(JSON.stringify(out));
+  if (args.includes("stream-json") && mode !== "error") {
+    const lines = [
+      { event: "init", conversation_id: conv, init: { model: "fake" } },
+      { event: "step_update", step_update: { step_index: 1, state: "ACTIVE", step_type: "tool", tool_name: "read_file", tool_info: { parameters: { Path: process.cwd() + "/a.py" } } } },
+      { event: "step_update", step_update: { step_index: 1, state: "DONE", step_type: "tool", tool_name: "read_file", tool_info: { parameters: { Path: process.cwd() + "/a.py" } } } },
+      { event: "step_update", step_update: { step_index: 2, state: "ACTIVE", step_type: "agent_response" } },
+      { event: "step_update", step_update: { step_index: 2, state: "ACTIVE", step_type: "agent_response" } },
+      { event: "result", result: out }
+    ];
+    process.stdout.write(lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+  } else {
+    process.stdout.write(JSON.stringify(out));
+  }
 }, delay);

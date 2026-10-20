@@ -12,7 +12,7 @@ Raw request:
 How to run it:
 - Leading `--background`, `--resume`, `--fresh`, `--backend`, `--model`, `--effort` are options; everything after them is the question.
 - Antigravity can read files in this repository but cannot see this conversation. If the question depends on context only this conversation has (an error message, a decision, which file), rewrite it into a self-contained question with the relevant paths and facts. Otherwise keep the user's wording.
-- Run exactly one Bash call with `timeout: 600000`. Put the options on the command line and the question in a quoted heredoc, copied as-is (no escaping needed; the shell does not expand anything inside it):
+- Start it with one Bash call with `timeout: 600000`. Put the options on the command line and the question in a quoted heredoc, copied as-is (no escaping needed; the shell does not expand anything inside it):
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/companion.mjs" task <options> --stdin <<'ANTIGRAVITY_PROMPT'
@@ -22,6 +22,9 @@ ANTIGRAVITY_PROMPT
 
 - Do not pass `--write`; this command is read-only.
 - If the user did not pass `--resume` or `--fresh` and the question is clearly a follow-up ("and what about…", "continue", "dig deeper"), add `--resume`.
+
+Long runs:
+- If the output says the job is still running, it has not failed: run the `Wait for it` command it prints with Bash (`timeout: 600000`) and repeat while it keeps saying still running. Present the final answer only.
 
 Presenting the answer:
 - Show the command output verbatim under the heading `## Antigravity`.

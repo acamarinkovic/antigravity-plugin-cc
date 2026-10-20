@@ -79,6 +79,7 @@ The gate runs once per stop: the follow-up stop after a block is allowed through
 | `ANTIGRAVITY_COMPANION_MODEL` | `gemini-4-argon-high` | Default agy model |
 | `ANTIGRAVITY_COMPANION_GEMINI_MODEL` | Gemini CLI default | Default Gemini CLI model |
 | `ANTIGRAVITY_AGY_BIN`, `ANTIGRAVITY_GEMINI_BIN` | `agy`, `gemini` | Binary paths |
+| `ANTIGRAVITY_COMPANION_WAIT_MS` | `540000` | How long a foreground command or `status --wait` waits before handing back (capped at 570000, below the 10-minute Bash limit) |
 | `ANTIGRAVITY_COMPANION_DATA` | set by the SessionStart hook | State directory; the plugin never reads or exports the shared `CLAUDE_PLUGIN_DATA` outside its own hooks, so it cannot collide with other plugins |
 
 Job state is stored per repository under the plugin data directory (`$ANTIGRAVITY_COMPANION_DATA/state`, by default `<Claude config dir>/plugins/data/antigravity-antigravity-cc/state`), readable only by your user. The last 50 jobs are kept.
@@ -86,7 +87,7 @@ Job state is stored per repository under the plugin data directory (`$ANTIGRAVIT
 ## Limitations
 
 - Each call starts a fresh `agy` process, which takes roughly 40–90 seconds. Use `--background` for anything large.
-- Foreground runs stop after 8 minutes, because Claude Code's Bash tool allows at most 10. Background runs get 60 minutes. `--timeout 30m` changes the limit; anything over 8 minutes only makes sense together with `--background`.
+- Every run is a detached job with a 60-minute limit (`--timeout 2h` changes it). A foreground command waits up to 9 minutes, because Claude Code's Bash tool allows at most 10 per call. If Antigravity is still working by then, nothing is lost: the job keeps running and Claude keeps waiting with `status <job> --wait` until it finishes. Interrupting the command (Esc) cancels the job.
 - Gemini CLI has no structured-output flag, so its reviews are parsed from JSON in the reply. If parsing fails, the raw text is shown.
 - Gemini CLI's `gateway` sign-in cannot be used headless. `/antigravity:setup` says so and explains how to switch.
 - Antigravity cannot import a Claude transcript, so there is no command to move a Claude session into Antigravity.

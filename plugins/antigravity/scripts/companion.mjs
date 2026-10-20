@@ -17,8 +17,8 @@ const INLINE_LIMIT = 100 * 1024;
 const GEMINI_STDIN_LIMIT = 7 * 1024 * 1024;
 const UNTRACKED_LIMIT = 24 * 1024;
 const MAX_JOBS = 50;
-const FOREGROUND_TIMEOUT = "8m";
-const BACKGROUND_TIMEOUT = "60m";
+const JOB_TIMEOUT = "60m";
+const WAIT_MS = Math.min(Number(process.env.ANTIGRAVITY_COMPANION_WAIT_MS) || 540000, 570000);
 const GEMINI_HEADLESS_AUTH = ["oauth-personal", "gemini-api-key", "vertex-ai", "compute-default-credentials"];
 const SEVERITY_ORDER = { critical: 0, high: 1, medium: 2, low: 3 };
 
@@ -285,7 +285,7 @@ function buildInvocation(job, dir) {
       prompt = `Read your complete instructions from ${file} and follow them exactly. ${req.schema ? "Your final answer must match the provided JSON schema." : ""}`.trim();
       addDirs.push(inputs);
     }
-    const args = ["-p", prompt, "--output-format", "json", "--print-timeout", req.timeout, "--sandbox"];
+    const args = ["-p", prompt, "--output-format", "stream-json", "--print-timeout", req.timeout, "--sandbox"];
     args.push("--mode", job.write ? "accept-edits" : "plan");
     if (job.model) args.push("--model", job.model);
     if (job.effort) args.push("--effort", job.effort);
@@ -323,6 +323,37 @@ function extractJsonObject(text) {
     } catch {}
   }
   return null;
+}
+
+function parseAgyStream(stdout, stderr, code) {
+  let fallback = null;
+  for (const line of stdout.split("\n").reverse()) {
+    let d;
+    try {
+      d = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (d.event === "result" && d.result) return parseAgy(JSON.stringify(d.result), stderr, code);
+    if (!fallback && typeof d.status === "string") fallback = line;
+  }
+  return parseAgy(fallback || stdout, stderr, code);
+}
+
+function describeStep(su) {
+  const params = su.tool_info?.parameters || {};
+  const target = params.Path || params.path || params.AbsolutePath || params.DirectoryPath || params.Query || params.query || params.Url || "";
+  const shown = typeof target === "string" && target.startsWith("/") ? path.basename(target) : String(target).slice(0, 60);
+  return `step ${su.step_index}: ${su.tool_name}${shown ? ` ${shown}` : ""}`;
+}
+
+function recordProgress(dir, job, text, log) {
+  fs.writeSync(log, `[${new Date().toISOString()}] ${text}\n`);
+  const current = loadJob(dir, job.id);
+  if (!current || !isActive(current)) return;
+  current.progress = { text, at: new Date().toISOString() };
+  current.steps = (current.steps || 0) + 1;
+  saveJob(dir, current);
 }
 
 function parseAgy(stdout, stderr, code) {
@@ -408,7 +439,32 @@ function runBackend(job, dir) {
     const stop = () => child.kill("SIGTERM");
     process.once("SIGTERM", stop);
     process.once("SIGINT", stop);
-    child.stdout.on("data", (b) => (stdout += b));
+    let pending = "";
+    const seen = new Set();
+    child.stdout.on("data", (b) => {
+      stdout += b;
+      if (job.backend !== "agy") return;
+      pending += b;
+      const lines = pending.split("\n");
+      pending = lines.pop();
+      for (const line of lines) {
+        let d;
+        try {
+          d = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        const su = d.event === "step_update" ? d.step_update : null;
+        if (!su || seen.has(su.step_index) || su.tool_name === "finish") continue;
+        if (su.step_type === "tool") {
+          seen.add(su.step_index);
+          recordProgress(dir, job, describeStep(su), log);
+        } else if (su.step_type === "agent_response") {
+          seen.add(su.step_index);
+          recordProgress(dir, job, `step ${su.step_index}: thinking`, log);
+        }
+      }
+    });
     child.stderr.on("data", (b) => {
       stderr += b;
       fs.writeSync(log, b);
@@ -422,14 +478,14 @@ function runBackend(job, dir) {
       process.removeListener("SIGINT", stop);
       fs.closeSync(log);
       if (timedOut) {
-        resolve({ ok: false, error: `${inv.bin} did not finish within ${job.request.timeout}. Retry with --background or a larger --timeout.` });
+        resolve({ ok: false, error: `${inv.bin} did not finish within ${job.request.timeout}. Retry with a larger --timeout, for example --timeout 2h.` });
         return;
       }
       if (signal) {
-        resolve({ ok: false, error: `${inv.bin} was stopped (${signal}).` });
+        resolve({ ok: false, signal, error: `${inv.bin} was stopped (${signal}).` });
         return;
       }
-      resolve(job.backend === "agy" ? parseAgy(stdout, stderr, code) : parseGemini(stdout, stderr, code));
+      resolve(job.backend === "agy" ? parseAgyStream(stdout, stderr, code) : parseGemini(stdout, stderr, code));
     });
     child.stdin.on("error", () => {});
     child.stdin.end(inv.stdin ?? "");
@@ -495,6 +551,7 @@ function render(job) {
 }
 
 async function executeJob(dir, job) {
+  if (loadJob(dir, job.id)?.status === "cancelled") return loadJob(dir, job.id);
   job.status = "running";
   job.pid = process.pid;
   job.startedAt = new Date().toISOString();
@@ -517,9 +574,10 @@ async function executeJob(dir, job) {
   }
   const current = loadJob(dir, job.id);
   if (current && current.status === "cancelled") return current;
+  if (current) Object.assign(job, { steps: current.steps, progress: current.progress });
   job.result = result;
   job.durationSeconds = Math.round((Date.now() - started) / 1000);
-  job.status = result.ok || result.text ? "completed" : "failed";
+  job.status = result.signal ? "cancelled" : result.ok || result.text ? "completed" : "failed";
   job.error = result.ok ? null : result.error;
   job.completedAt = new Date().toISOString();
   job.rendered = render(job);
@@ -545,23 +603,77 @@ function createJob(cwd, fields) {
   return { dir, job };
 }
 
-async function launch(dir, job, background) {
-  if (!background) {
-    const done = await executeJob(dir, job);
-    process.stdout.write(done.rendered + "\n");
-    process.exitCode = done.status === "completed" ? 0 : 1;
-    return;
+async function waitForJob(dir, id, ms) {
+  const deadline = Date.now() + ms;
+  let job = loadJob(dir, id);
+  while (job && (isActive(job) || job.status === "queued") && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 500));
+    job = listJobs(dir).find((j) => j.id === id) || loadJob(dir, id);
   }
+  return job;
+}
+
+async function waitCancellingOnInterrupt(dir, id, ms) {
+  const interrupt = () => {
+    const current = loadJob(dir, id);
+    if (current && !isActive(current)) {
+      process.stdout.write((current.rendered || current.error || "") + "\n");
+      process.exit(0);
+    }
+    if (current) {
+      current.status = "cancelled";
+      current.completedAt = new Date().toISOString();
+      current.rendered = `${current.title} was cancelled.`;
+      saveJob(dir, current);
+      terminate(current.pid);
+    }
+    process.exit(130);
+  };
+  process.once("SIGINT", interrupt);
+  process.once("SIGTERM", interrupt);
+  const job = await waitForJob(dir, id, ms);
+  process.removeListener("SIGINT", interrupt);
+  process.removeListener("SIGTERM", interrupt);
+  return job;
+}
+
+function stillRunning(job) {
+  const now = job.progress ? ` Last step: ${job.progress.text}; ${job.steps} steps so far.` : "";
+  return `${job.title} is still running (${elapsed(job)} so far) and continues in the background as ${job.id}.${now}\nWait for it: node "${SELF}" status ${job.id} --wait\nOr later: /antigravity:result ${job.id} · stop it: /antigravity:cancel ${job.id}\n`;
+}
+
+async function launch(dir, job, background) {
   const child = spawn(process.execPath, [SELF, "worker", dir, job.id], {
     cwd: job.cwd,
     detached: true,
     stdio: "ignore",
     env: process.env
   });
+  child.on("error", () => {});
   child.unref();
+  if (!child.pid) {
+    job.status = "failed";
+    job.error = "Could not start the background worker process.";
+    job.rendered = `${job.title} failed.\n\n${job.error}`;
+    job.completedAt = new Date().toISOString();
+    saveJob(dir, job);
+    process.stdout.write(job.rendered + "\n");
+    process.exitCode = 1;
+    return;
+  }
   job.pid = child.pid;
   saveJob(dir, job);
-  process.stdout.write(`${job.title} started in the background as ${job.id}.\nCheck /antigravity:status ${job.id} for progress and /antigravity:result ${job.id} for the answer.\n`);
+  if (background) {
+    process.stdout.write(`${job.title} started in the background as ${job.id}.\nCheck /antigravity:status ${job.id} for progress and /antigravity:result ${job.id} for the answer.\n`);
+    return;
+  }
+  const done = await waitCancellingOnInterrupt(dir, job.id, WAIT_MS);
+  if (done && !isActive(done)) {
+    process.stdout.write((done.rendered || done.error || "No output was stored.") + "\n");
+    process.exitCode = done.status === "completed" ? 0 : 1;
+    return;
+  }
+  process.stdout.write(stillRunning(done || job));
 }
 
 function resumeCandidate(dir, backend) {
@@ -604,7 +716,7 @@ async function cmdTask(args) {
     model: resolveModel(backend, opts.model, effort),
     effort,
     write: Boolean(opts.write),
-    request: { prompt, resume, timeout: opts.timeout || (opts.background ? BACKGROUND_TIMEOUT : FOREGROUND_TIMEOUT) }
+    request: { prompt, resume, timeout: opts.timeout || JOB_TIMEOUT }
   });
   await launch(dir, job, opts.background);
 }
@@ -700,7 +812,7 @@ async function cmdReview(kind, argv) {
     request: {
       prompt,
       schema: path.join(PLUGIN_ROOT, "schemas", "review-output.schema.json"),
-      timeout: opts.timeout || (opts.background ? BACKGROUND_TIMEOUT : FOREGROUND_TIMEOUT)
+      timeout: opts.timeout || JOB_TIMEOUT
     }
   });
   await launch(dir, job, opts.background && !opts.wait);
@@ -718,22 +830,19 @@ async function cmdStatus(args) {
   const dir = stateDir(workspaceRoot(process.cwd()));
   if (rest[0]) {
     let job = findJob(dir, rest[0], () => true, "");
-    const deadline = Date.now() + Number(opts["timeout-ms"] || 240000);
-    while (opts.wait && isActive(job) && Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 2000));
-      job = findJob(dir, job.id, () => true, "");
-    }
+    if (opts.wait && isActive(job)) job = (await waitCancellingOnInterrupt(dir, job.id, Math.min(Number(opts["timeout-ms"]) || WAIT_MS, 570000))) || job;
     if (opts.json) return void process.stdout.write(JSON.stringify(job, null, 2) + "\n");
     const lines = [
       `Job ${job.id}`,
       `Kind: ${job.kind} · ${backendLabel(job)}${job.write ? " · write" : " · read-only"}`,
-      `Status: ${job.status} · ${elapsed(job)}`,
+      `Status: ${job.status} · ${elapsed(job)}${job.steps ? ` · ${job.steps} steps` : ""}`,
+      ...(isActive(job) && job.progress ? [`Now: ${job.progress.text} (${elapsed({ startedAt: job.progress.at })} ago)`] : []),
       `Summary: ${job.summary}`
     ];
     if (isActive(job)) {
       const logTail = tail(readText(logFile(dir, job.id)), 6);
       if (logTail) lines.push("", "Recent log:", logTail);
-      lines.push("", `Cancel with /antigravity:cancel ${job.id}`);
+      lines.push("", `Still running. Wait again: node "${SELF}" status ${job.id} --wait`, `Cancel with /antigravity:cancel ${job.id}`);
     } else {
       lines.push("", job.rendered || job.error || "");
     }
@@ -749,7 +858,7 @@ async function cmdStatus(args) {
   } else {
     out.push("", "| Job | Kind | Backend | Status | Time | Summary |", "|---|---|---|---|---|---|");
     for (const j of jobs) {
-      out.push(`| ${j.id} | ${j.kind}${j.write ? " (write)" : ""} | ${j.backend}${j.model ? ` ${j.model}` : ""} | ${j.status} | ${elapsed(j)} | ${String(j.summary).replace(/\|/g, "/")} |`);
+      out.push(`| ${j.id} | ${j.kind}${j.write ? " (write)" : ""} | ${j.backend}${j.model ? ` ${j.model}` : ""} | ${j.status}${isActive(j) && j.progress ? ` (${j.progress.text})` : ""} | ${elapsed(j)} | ${String(j.summary).replace(/\|/g, "/")} |`);
     }
     out.push("", "Details: /antigravity:status <job> · answer: /antigravity:result <job> · stop: /antigravity:cancel <job>");
   }

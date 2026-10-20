@@ -66,8 +66,8 @@ test("read-only question uses plan mode, sandbox and Gemini 4 Argon High by defa
   assert.equal(flag(c.args, "--mode"), "plan");
   assert.ok(c.args.includes("--sandbox"));
   assert.equal(flag(c.args, "--model"), "gemini-4-argon-high");
-  assert.equal(flag(c.args, "--output-format"), "json");
-  assert.equal(flag(c.args, "--print-timeout"), "8m");
+  assert.equal(flag(c.args, "--output-format"), "stream-json");
+  assert.equal(flag(c.args, "--print-timeout"), "60m");
 });
 
 test("--write switches to accept-edits and --effort strips the model effort suffix", () => {
@@ -396,4 +396,67 @@ test("state fallback honours CLAUDE_CONFIG_DIR", () => {
   const cfg = path.join(box.root, "cfg");
   run(box, ["task", "--", "x"], { ANTIGRAVITY_COMPANION_DATA: "", CLAUDE_CONFIG_DIR: cfg });
   assert.ok(fs.existsSync(path.join(cfg, "plugins", "data", "antigravity-antigravity-cc", "state")));
+});
+
+test("a run longer than the wait window hands off to the background with progress, and status --wait collects it", () => {
+  const box = sandbox();
+  const r = run(box, ["task", "--", "long one"], { FAKE_DELAY_MS: "3000", ANTIGRAVITY_COMPANION_WAIT_MS: "1200" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /is still running .* continues in the background as (task-\S+)\./);
+  assert.match(r.stdout, /Last step: step 1: view_file a\.py; 1 steps so far/);
+  const id = r.stdout.match(/background as (\S+)\./)[1];
+  assert.match(r.stdout, new RegExp(`status ${id} --wait`));
+  const mid = run(box, ["status", id]);
+  assert.match(mid.stdout, /Now: step 1: view_file a\.py/);
+  const done = run(box, ["status", `${id} --wait`], { ANTIGRAVITY_COMPANION_WAIT_MS: "15000" });
+  assert.match(done.stdout, /Status: completed/);
+  assert.match(done.stdout, /answer to: long one/);
+});
+
+test("progress steps from the stream are recorded in the job", () => {
+  const box = sandbox();
+  const r = run(box, ["task", "--", "x"]);
+  const id = r.stdout.match(/Job: (\S+)/)[1];
+  const job = JSON.parse(run(box, ["status", `${id} --json`]).stdout);
+  assert.equal(job.steps, 2);
+  assert.match(job.progress.text, /step 2: thinking/);
+  const log = fs.readFileSync(path.join(path.dirname(path.dirname(fs.readdirSync(path.join(box.data, "state")).map((d) => path.join(box.data, "state", d, "jobs", "x"))[0])), "jobs", `${id}.log`), "utf8");
+  assert.match(log, /step 1: read_file a\.py\n.*step 2: thinking/s);
+});
+
+test("interrupting a foreground wait cancels the job and stops agy", async () => {
+  const box = sandbox();
+  const { spawn } = await import("node:child_process");
+  const env = { ...process.env, ANTIGRAVITY_COMPANION_DATA: box.data, ANTIGRAVITY_AGY_BIN: path.join(BIN, "agy"), FAKE_LOG: box.log, FAKE_DELAY_MS: "30000", ANTIGRAVITY_COMPANION_SESSION_ID: "session-A" };
+  const child = spawn(process.execPath, [SCRIPT, "task", "--", "x"], { cwd: box.repo, env });
+  assert.ok(waitFor(() => calls(box).length === 1));
+  child.kill("SIGINT");
+  await new Promise((res) => child.on("close", res));
+  const list = JSON.parse(run(box, ["status", "--json --all"]).stdout).jobs;
+  assert.equal(list[0].status, "cancelled");
+  assert.ok(waitFor(() => { try { process.kill(list[0].pid, 0); return false; } catch { return true; } }));
+});
+
+test("a job whose agy process is stopped by a signal is recorded as cancelled, not failed", () => {
+  const box = sandbox();
+  const r = run(box, ["task", "--background", "--", "x"], { FAKE_DELAY_MS: "30000" });
+  const id = r.stdout.match(/background as (\S+)\./)[1];
+  assert.ok(waitFor(() => calls(box).length === 1));
+  const agyPid = Number(spawnSync("pgrep", ["-f", `${BIN}/agy`], { encoding: "utf8" }).stdout.trim().split("\n")[0]);
+  process.kill(agyPid, "SIGTERM");
+  assert.ok(waitFor(() => /Status: cancelled/.test(run(box, ["status", id]).stdout)));
+});
+
+test("interrupting status --wait cancels the running job", async () => {
+  const box = sandbox();
+  const r = run(box, ["task", "--background", "--", "x"], { FAKE_DELAY_MS: "30000" });
+  const id = r.stdout.match(/background as (\S+)\./)[1];
+  assert.ok(waitFor(() => /Status: running/.test(run(box, ["status", id]).stdout)));
+  const { spawn } = await import("node:child_process");
+  const env = { ...process.env, ANTIGRAVITY_COMPANION_DATA: box.data, ANTIGRAVITY_COMPANION_SESSION_ID: "session-A" };
+  const waiter = spawn(process.execPath, [SCRIPT, "status", id, "--wait"], { cwd: box.repo, env });
+  await new Promise((res) => setTimeout(res, 800));
+  waiter.kill("SIGINT");
+  await new Promise((res) => waiter.on("close", res));
+  assert.match(run(box, ["status", id]).stdout, /Status: cancelled/);
 });

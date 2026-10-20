@@ -13,7 +13,7 @@ Raw arguments:
 Execution mode:
 - `--wait` → foreground. `--background` → background. Otherwise size the change first with `git status --short --untracked-files=all` and `git diff --shortstat HEAD` (or `git diff --shortstat <base>...HEAD` with `--base`). If it is roughly 1–3 files, run in the foreground without asking. Otherwise ask once with `AskUserQuestion`: `Run in background (Recommended)` / `Wait for results`.
 
-Run exactly one Bash call with `timeout: 600000`:
+Start it with one Bash call with `timeout: 600000`:
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/companion.mjs" review --args-stdin <--background or --wait> <<'ANTIGRAVITY_ARGS'
@@ -22,6 +22,9 @@ ANTIGRAVITY_ARGS
 ```
 
 Copy the raw arguments into the quoted heredoc exactly as given, even when empty; never put them on the command line. Pass `--background` after `--args-stdin` when running in the background, otherwise `--wait`; the script detaches its own worker, so do not use `run_in_background`.
+
+Long runs:
+- If the output says the job is still running, it has not failed: run the `Wait for it` command it prints with Bash (`timeout: 600000`) and repeat while it keeps saying still running. Present the final answer only.
 
 Output:
 - Return the command stdout verbatim.
