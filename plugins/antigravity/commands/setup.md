@@ -1,11 +1,19 @@
 ---
-description: Check Antigravity (agy) and Gemini CLI, pick the default model and thinking level for all projects, toggle the stop review gate
-argument-hint: "[--choose] [--model <id>] [--effort low|medium|high|xhigh|max] [--reset-defaults] [--enable-review-gate|--disable-review-gate]"
+description: Check or install the Antigravity CLI (agy), pick the default model and thinking level for all projects, toggle the stop review gate
+argument-hint: "[--install-agy] [--choose] [--model <id>] [--effort low|medium|high|xhigh|max] [--reset-defaults] [--enable-review-gate|--disable-review-gate]"
 allowed-tools: Bash(node:*), AskUserQuestion
 ---
 
 Raw arguments:
 `$ARGUMENTS`
+
+Every Bash call below uses `timeout: 600000`.
+
+First run `node "${CLAUDE_PLUGIN_ROOT}/scripts/companion.mjs" setup --json`. If `agy.installed` is false:
+- Always ask once with `AskUserQuestion` before installing, even when the arguments contain `--install-agy`: `Install Antigravity CLI (Recommended)` (description: runs Google's official installer, `agy.installCommand`) / `Skip for now`. Never install without that answer.
+- On install, run `node "${CLAUDE_PLUGIN_ROOT}/scripts/companion.mjs" setup --install-agy` and present its output. Then tell the user to run `agy` once in a terminal to sign in with Google, and to rerun `/antigravity:setup` afterwards.
+- On skip, present the normal setup output.
+Never pass `--install-agy` in any other case.
 
 If the arguments contain `--choose`, or the user asks to pick or change the model or thinking level without naming them:
 1. Run `node "${CLAUDE_PLUGIN_ROOT}/scripts/companion.mjs" setup --json` and read `agy.families` (each has `model`, `name`, `efforts`) and the current `defaultModel` / `defaultEffort`.

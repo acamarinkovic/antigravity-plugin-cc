@@ -563,3 +563,64 @@ test("a failed run does not claim a model, and timeouts still remove the tempora
   const logFlag = flag(calls(box)[1].args, "--log-file");
   assert.ok(waitFor(() => !fs.existsSync(logFlag)));
 });
+
+function noAgyEnv(box) {
+  const home = path.join(box.root, "home");
+  const bin = path.join(box.root, "fakebin");
+  fs.mkdirSync(home, { recursive: true });
+  fs.mkdirSync(bin, { recursive: true });
+  return { home, bin, env: { ANTIGRAVITY_AGY_BIN: "", HOME: home, PATH: `${bin}:/usr/bin:/bin` } };
+}
+
+test("setup reports a missing agy with Google's official install command and installs nothing by itself", () => {
+  const box = sandbox();
+  const { env, home } = noAgyEnv(box);
+  const report = JSON.parse(run(box, ["setup", "--json"], env).stdout);
+  assert.equal(report.agy.installed, false);
+  assert.equal(report.agy.installCommand, "curl -fsSL https://antigravity.google/cli/install.sh | bash");
+  assert.match(report.nextSteps.join("\n"), /can install it with Google's official installer .* once you agree/);
+  assert.ok(!fs.existsSync(path.join(home, ".local", "bin", "agy")));
+});
+
+test("setup --install-agy runs the official installer and then finds agy in ~/.local/bin without PATH changes", () => {
+  const box = sandbox();
+  const { env, bin, home } = noAgyEnv(box);
+  const agySource = path.join(box.root, "agy-payload");
+  fs.writeFileSync(agySource, ["#!/bin/sh", 'if [ "$1" = "--version" ]; then echo 9.9.9; exit 0; fi', 'if [ "$1" = "models" ]; then printf "m-one-high\\tM One (High)\\n"; exit 0; fi', ""].join("\n"));
+  const installScript = path.join(box.root, "install.sh");
+  fs.writeFileSync(installScript, ['mkdir -p "$HOME/.local/bin"', `cp "${agySource}" "$HOME/.local/bin/agy"`, 'chmod +x "$HOME/.local/bin/agy"', ""].join("\n"));
+  fs.writeFileSync(path.join(bin, "curl"), ["#!/bin/sh", `echo "$@" > "${box.root}/curl-args"`, `cat "${installScript}"`, ""].join("\n"), { mode: 0o755 });
+  const r = run(box, ["setup", "--install-agy"], env);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(fs.readFileSync(path.join(box.root, "curl-args"), "utf8"), /-fsSL https:\/\/antigravity\.google\/cli\/install\.sh/);
+  assert.match(r.stdout, /Installed the Antigravity CLI with Google's installer/);
+  assert.match(r.stdout, /agy: signed in, 1 models \(v9\.9\.9\)/);
+  assert.ok(fs.existsSync(path.join(home, ".local", "bin", "agy")));
+  const again = run(box, ["setup", "--install-agy"], env);
+  assert.match(again.stdout, /already installed; nothing was changed/);
+});
+
+test("a failing installer is reported with its output", () => {
+  const box = sandbox();
+  const { env, bin } = noAgyEnv(box);
+  fs.writeFileSync(path.join(bin, "curl"), "#!/bin/sh\necho 'curl: (6) Could not resolve host' >&2\nexit 6\n", { mode: 0o755 });
+  const r = run(box, ["setup", "--install-agy"], env);
+  assert.match(r.stdout, /installer did not finish \(exit 6\)/);
+  assert.match(r.stdout, /Could not resolve host/);
+});
+
+test("a file or folder named agy in the current directory does not count as an installed CLI", () => {
+  const box = sandbox();
+  const { env } = noAgyEnv(box);
+  fs.mkdirSync(path.join(box.repo, "agy"));
+  const report = JSON.parse(run(box, ["setup", "--json"], env).stdout);
+  assert.equal(report.agy.installed, false);
+});
+
+test("a stale ANTIGRAVITY_AGY_BIN is named when the installer succeeded elsewhere", () => {
+  const box = sandbox();
+  const { env, bin } = noAgyEnv(box);
+  fs.writeFileSync(path.join(bin, "curl"), ["#!/bin/sh", 'echo \'mkdir -p "$HOME/.local/bin"; printf "#!/bin/sh\\nexit 0\\n" > "$HOME/.local/bin/agy"; chmod +x "$HOME/.local/bin/agy"\'', ""].join("\n"), { mode: 0o755 });
+  const r = run(box, ["setup", "--install-agy"], { ...env, ANTIGRAVITY_AGY_BIN: "/nonexistent/agy" });
+  assert.match(r.stdout, /but ANTIGRAVITY_AGY_BIN points to \/nonexistent\/agy/);
+});

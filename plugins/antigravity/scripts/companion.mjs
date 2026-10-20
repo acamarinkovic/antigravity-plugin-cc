@@ -28,6 +28,13 @@ const HEADLESS_NOTE = {
   write: "Headless session: you may edit files directly, but terminal commands are blocked (trying one ends your turn with no answer), so you cannot run tests or builds. Make the changes, then summarize what you changed."
 };
 
+const AGY_DEFAULT_PATH = process.platform === "win32"
+  ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "agy", "bin", "agy.exe")
+  : path.join(os.homedir(), ".local", "bin", "agy");
+const AGY_INSTALLER = process.platform === "win32"
+  ? { bin: "powershell", args: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "irm https://antigravity.google/cli/install.ps1 | iex"], text: "irm https://antigravity.google/cli/install.ps1 | iex" }
+  : { bin: "bash", args: ["-c", "set -o pipefail; curl -fsSL https://antigravity.google/cli/install.sh | bash"], text: "curl -fsSL https://antigravity.google/cli/install.sh | bash" };
+
 class UserError extends Error {}
 
 function fail(message) {
@@ -276,9 +283,9 @@ function resolveBackend(name) {
 }
 
 function binaryFor(backend) {
-  return backend === "agy"
-    ? process.env.ANTIGRAVITY_AGY_BIN || "agy"
-    : process.env.ANTIGRAVITY_GEMINI_BIN || "gemini";
+  if (backend !== "agy") return process.env.ANTIGRAVITY_GEMINI_BIN || "gemini";
+  if (process.env.ANTIGRAVITY_AGY_BIN) return process.env.ANTIGRAVITY_AGY_BIN;
+  return which("agy") || (fs.existsSync(AGY_DEFAULT_PATH) ? AGY_DEFAULT_PATH : "agy");
 }
 
 function resolveModel(backend, model, effort) {
@@ -947,21 +954,57 @@ function cmdCancel(args) {
 }
 
 function which(bin) {
-  const r = spawnSync("/bin/sh", ["-c", `command -v "$1"`, "sh", bin], { encoding: "utf8" });
-  return r.status === 0 ? r.stdout.trim() : null;
+  const r = process.platform === "win32"
+    ? spawnSync("where", [bin], { encoding: "utf8" })
+    : spawnSync("/bin/sh", ["-c", `command -v "$1"`, "sh", bin], { encoding: "utf8" });
+  return r.status === 0 ? r.stdout.trim().split(/\r?\n/)[0] : null;
+}
+
+function agyPath() {
+  const bin = binaryFor("agy");
+  return which(bin) || (path.isAbsolute(bin) && fs.existsSync(bin) ? bin : null);
+}
+
+function runInstaller() {
+  return new Promise((resolve) => {
+    let output = "";
+    let child;
+    try {
+      child = spawn(AGY_INSTALLER.bin, AGY_INSTALLER.args, { detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
+    } catch (err) {
+      resolve({ code: err.code, output: err.message });
+      return;
+    }
+    const timer = setTimeout(() => {
+      output += "\nTimed out after 5 minutes.";
+      terminate(child.pid);
+    }, 300000);
+    child.stdout.on("data", (b) => (output += b));
+    child.stderr.on("data", (b) => (output += b));
+    child.on("error", (err) => (output += `\n${err.message}`));
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      resolve({ code: code ?? signal, output });
+    });
+  });
 }
 
 function checkAgy() {
-  const bin = binaryFor("agy");
-  const found = which(bin);
+  const found = agyPath();
   if (!found) {
-    return { ready: false, detail: "not installed", next: "Install Google Antigravity and its CLI (`agy`), then run `agy install` once." };
+    return {
+      ready: false,
+      installed: false,
+      installCommand: AGY_INSTALLER.text,
+      detail: "not installed",
+      next: `The Antigravity CLI is not installed. /antigravity:setup can install it with Google's official installer (${AGY_INSTALLER.text}) once you agree; then run \`agy\` once in a terminal to sign in.`
+    };
   }
   const version = spawnSync(found, ["--version"], { encoding: "utf8", timeout: 15000 }).stdout?.trim();
   const models = spawnSync(found, ["models"], { encoding: "utf8", timeout: 30000, input: "" });
   const rows = (models.stdout || "").split("\n").map((l) => l.split("\t").map((c) => c.trim())).filter(([id]) => /^[a-z0-9][a-z0-9.-]+$/.test(id || ""));
   if (models.status !== 0 || rows.length === 0) {
-    return { ready: false, path: found, version, detail: "installed but not signed in", next: "Run `agy` once in a terminal and complete the Google sign-in, then rerun /antigravity:setup." };
+    return { ready: false, installed: true, path: found, version, detail: "installed but not signed in", next: "Run `agy` once in a terminal and complete the Google sign-in, then rerun /antigravity:setup." };
   }
   const suffix = new RegExp(`-(${AGY_EFFORTS.join("|")})$`);
   const families = [];
@@ -971,7 +1014,7 @@ function checkAgy() {
     if (!fam) families.push((fam = { model: base, name: label.replace(/\s*\([^)]*\)\s*$/, ""), efforts: [] }));
     if (base !== id) fam.efforts.push(id.slice(base.length + 1));
   }
-  return { ready: true, path: found, version, models: rows.map(([id]) => id), families, detail: `signed in, ${rows.length} models` };
+  return { ready: true, installed: true, path: found, version, models: rows.map(([id]) => id), families, detail: `signed in, ${rows.length} models` };
 }
 
 function checkGemini() {
@@ -993,9 +1036,9 @@ function checkGemini() {
   };
 }
 
-function cmdSetup(args) {
+async function cmdSetup(args) {
   const { opts } = parseFlags(argsFrom(args), {
-    flags: ["json", "enable-review-gate", "disable-review-gate", "reset-defaults"],
+    flags: ["json", "enable-review-gate", "disable-review-gate", "reset-defaults", "install-agy"],
     values: ["model", "effort"],
     anywhere: true
   });
@@ -1008,6 +1051,20 @@ function cmdSetup(args) {
     config.stopReviewGate = Boolean(opts["enable-review-gate"]);
     saveConfig(dir, config);
     actions.push(`Stop review gate ${config.stopReviewGate ? "enabled" : "disabled"} for this repository.`);
+  }
+  if (opts["install-agy"]) {
+    if (agyPath()) {
+      actions.push("The Antigravity CLI is already installed; nothing was changed.");
+    } else {
+      const run = await runInstaller();
+      if (agyPath()) {
+        actions.push(`Installed the Antigravity CLI with Google's installer (${AGY_INSTALLER.text}).`);
+      } else if (run.code === 0 && fs.existsSync(AGY_DEFAULT_PATH)) {
+        actions.push(`Installed the Antigravity CLI at ${AGY_DEFAULT_PATH}, but ANTIGRAVITY_AGY_BIN points to ${process.env.ANTIGRAVITY_AGY_BIN}; unset it or point it there.`);
+      } else {
+        actions.push(`The Antigravity CLI installer did not finish (exit ${run.code}):\n${tail(run.output, 8)}`);
+      }
+    }
   }
   const agy = checkAgy();
   const gemini = checkGemini();

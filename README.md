@@ -8,7 +8,7 @@ This is an unofficial community plugin. It is not affiliated with or endorsed by
 
 - Claude Code with plugin support
 - Node.js 18 or newer
-- Google Antigravity with its CLI `agy`, signed in once interactively (run `agy` and finish the Google sign-in)
+- The Antigravity CLI `agy`, signed in once interactively (run `agy` and finish the Google sign-in); `/antigravity:setup` can install it
 - Optional: Gemini CLI (`npm install -g @google/gemini-cli`), signed in with "Login with Google" or an API key
 
 ## Install
@@ -18,7 +18,7 @@ claude plugin marketplace add acamarinkovic/antigravity-plugin-cc
 claude plugin install antigravity@antigravity-cc
 ```
 
-Then run `/antigravity:setup` in Claude Code. It reports whether `agy` and `gemini` are installed and signed in, and lists the models your account can use.
+Then run `/antigravity:setup` in Claude Code. It reports whether `agy` and `gemini` are installed and signed in, and lists the models your account can use. If `agy` is missing, it offers to run Google's official installer for you (`curl -fsSL https://antigravity.google/cli/install.sh | bash`, or the PowerShell installer on Windows); signing in is still done by you, by running `agy` once in a terminal.
 
 ### Choose your default model and thinking level
 
@@ -43,7 +43,7 @@ Accounts differ, so nothing is hard-coded: until you choose, the plugin lets `ag
 | `/antigravity:status [job] [--wait] [--all]` | Lists running and recent jobs, or shows one job in detail. |
 | `/antigravity:result [job]` | Prints the stored answer of a finished job. |
 | `/antigravity:cancel [job]` | Stops a running job. |
-| `/antigravity:setup [--enable-review-gate\|--disable-review-gate]` | Checks the installation and sign-in, and turns the stop review gate on or off. |
+| `/antigravity:setup [--choose\|--model <id> --effort <level>\|--reset-defaults] [--enable-review-gate\|--disable-review-gate]` | Checks the installation and sign-in, offers to install `agy` when it is missing (only after you agree), saves your default model and thinking level, and turns the stop review gate on or off. |
 
 Common options (they go before the question or focus text):
 
