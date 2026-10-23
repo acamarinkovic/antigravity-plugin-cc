@@ -1,6 +1,6 @@
 ---
 description: Delegate an investigation or a fix to Google Antigravity through the rescue subagent
-argument-hint: "[--background|--wait] [--resume|--fresh] [--read-only] [--backend agy|gemini] [--model <id>] [--effort <level>] [task]"
+argument-hint: "[--background|--wait] [--resume|--fresh] [--read-only] [--backend agy|gemini] [--model <id>] [--effort <level>] [--permission auto|accept-edits|dangerous] [--add-dir <path>] [task]"
 allowed-tools: Bash(node:*), AskUserQuestion, Agent
 ---
 

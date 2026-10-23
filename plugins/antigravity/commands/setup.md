@@ -1,6 +1,6 @@
 ---
 description: Check or install the Antigravity CLI (agy), pick the default model and thinking level for all projects, toggle the stop review gate
-argument-hint: "[--install-agy] [--choose] [--model <id>] [--effort low|medium|high|xhigh|max] [--reset-defaults] [--enable-review-gate|--disable-review-gate]"
+argument-hint: "[--install-agy] [--choose] [--model <id>] [--effort low|medium|high|xhigh|max] [--reset-defaults] [--permission auto|accept-edits|dangerous] [--enable-review-gate|--disable-review-gate]"
 allowed-tools: Bash(node:*), AskUserQuestion
 ---
 
@@ -31,5 +31,6 @@ ANTIGRAVITY_ARGS
 ```
 
 Present the output. Keep every sign-in instruction exactly as printed, because the user must run those themselves.
-Saved model and thinking level apply to every project for this user; `--model` / `--effort` on a single command still override them.
+Saved model, thinking level and write permission apply to every project for this user; `--model` / `--effort` / `--permission` on a single command still override them.
+If `--permission dangerous` was just saved, add one line: write tasks now run agy with `--dangerously-skip-permissions`, so Antigravity edits files and runs commands without asking; read-only commands are unchanged.
 If the stop review gate was just enabled, add one line: whenever Claude finishes a turn with uncommitted changes, Antigravity reviews them (about a minute) and can ask Claude to keep fixing; it runs only once per stop.

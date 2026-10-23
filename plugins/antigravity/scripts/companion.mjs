@@ -13,6 +13,8 @@ const SESSION_ENV = "ANTIGRAVITY_COMPANION_SESSION_ID";
 const DATA_ENV = "ANTIGRAVITY_COMPANION_DATA";
 const BACKENDS = ["agy", "gemini"];
 const AGY_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+const AGY_PERMISSIONS = ["auto", "accept-edits", "dangerous"];
+const AUTO_UNAVAILABLE = /--mode auto is not available/;
 const INLINE_LIMIT = 100 * 1024;
 const GEMINI_STDIN_LIMIT = 7 * 1024 * 1024;
 const UNTRACKED_LIMIT = 24 * 1024;
@@ -25,7 +27,9 @@ const SEVERITY_ORDER = { critical: 0, high: 1, medium: 2, low: 3 };
 const DENIED_RETRY_PROMPT = "Your last action was blocked: in this headless session terminal commands are never allowed, and trying one ends your turn without an answer. Do not run any command. Using only the files you can read and the content already given, give your complete final answer now, in the exact format that was requested.";
 const HEADLESS_NOTE = {
   read: "Headless, read-only session: you can read files but cannot edit them, and terminal commands are blocked (trying one ends your turn with no answer). Everything you need is in the files or in this message.",
-  write: "Headless session: you may edit files directly, but terminal commands are blocked (trying one ends your turn with no answer), so you cannot run tests or builds. Make the changes, then summarize what you changed."
+  write: "Headless session: you may edit files directly, but terminal commands are blocked (trying one ends your turn with no answer), so you cannot run tests or builds. Make the changes, then summarize what you changed.",
+  auto: "Headless session: you may edit files directly. Terminal commands run only when agy's auto mode allows them; a blocked one ends your turn with no answer, so do not depend on them. Make the changes, then summarize what you changed.",
+  dangerous: "Headless session: you may edit files and run terminal commands without asking. Make the changes, then summarize what you changed."
 };
 
 const AGY_DEFAULT_PATH = process.platform === "win32"
@@ -309,8 +313,8 @@ function buildInvocation(job, dir) {
   const req = job.request;
   const bin = binaryFor(job.backend);
   if (job.backend === "agy") {
-    let prompt = req.resume && req.prompt === DENIED_RETRY_PROMPT ? req.prompt : `${HEADLESS_NOTE[job.write ? "write" : "read"]}\n\n${req.prompt}`;
-    const addDirs = [];
+    let prompt = req.resume && req.prompt === DENIED_RETRY_PROMPT ? req.prompt : `${HEADLESS_NOTE[job.write ? (["auto", "dangerous"].includes(job.permission) ? job.permission : "write") : "read"]}\n\n${req.prompt}`;
+    const addDirs = [...(req.addDirs || [])];
     if (Buffer.byteLength(prompt) > INLINE_LIMIT) {
       const inputs = ensureDir(path.join(dir, "inputs"));
       const file = path.join(inputs, `${job.id}.md`);
@@ -318,8 +322,9 @@ function buildInvocation(job, dir) {
       prompt = `Read your complete instructions from ${file} and follow them exactly. ${req.schema ? "Your final answer must match the provided JSON schema." : ""}`.trim();
       addDirs.push(inputs);
     }
-    const args = ["-p", prompt, "--output-format", "stream-json", "--print-timeout", req.timeout, "--sandbox"];
-    args.push("--mode", job.write ? "accept-edits" : "plan");
+    const args = ["-p", prompt, "--output-format", "stream-json", "--print-timeout", req.timeout];
+    if (job.write && job.permission === "dangerous") args.push("--dangerously-skip-permissions");
+    else args.push("--sandbox", "--mode", job.write ? job.permission : "plan");
     if (job.model) args.push("--model", job.model);
     if (job.effort) args.push("--effort", job.effort);
     if (req.resume) args.push("--conversation", req.resume);
@@ -333,8 +338,9 @@ function buildInvocation(job, dir) {
     prompt += `\n\nReturn only a single JSON object, with no prose and no code fences, matching this JSON schema:\n${fs.readFileSync(req.schema, "utf8")}`;
   }
   if (Buffer.byteLength(prompt) > GEMINI_STDIN_LIMIT) fail("Input is larger than this plugin's 7 MB limit for Gemini CLI stdin.");
-  const args = ["-p", "", "-o", "json", "--approval-mode", job.write ? "auto_edit" : "plan"];
+  const args = ["-p", "", "-o", "json", "--approval-mode", job.write ? (job.permission === "dangerous" ? "yolo" : "auto_edit") : "plan"];
   if (job.model) args.push("-m", job.model);
+  for (const d of req.addDirs || []) args.push("--include-directories", d);
   if (req.resume) args.push("--resume", req.resume);
   return { bin, args, stdin: prompt };
 }
@@ -466,11 +472,16 @@ function runBackend(job, dir) {
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let autoUnavailable = false;
+    let stopped = false;
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill("SIGTERM");
     }, limitMs);
-    const stop = () => child.kill("SIGTERM");
+    const stop = () => {
+      stopped = true;
+      child.kill("SIGTERM");
+    };
     process.once("SIGTERM", stop);
     process.once("SIGINT", stop);
     let pending = "";
@@ -504,6 +515,10 @@ function runBackend(job, dir) {
     child.stderr.on("data", (b) => {
       stderr += b;
       fs.writeSync(log, b);
+      if (job.backend === "agy" && job.write && job.permission === "auto" && !autoUnavailable && !seen.size && AUTO_UNAVAILABLE.test(stderr)) {
+        autoUnavailable = true;
+        child.kill("SIGTERM");
+      }
     });
     child.on("error", (err) => {
       stderr += `\n${err.code === "ENOENT" ? `${inv.bin} is not installed or not on PATH. Run /antigravity:setup.` : err.message}`;
@@ -514,6 +529,10 @@ function runBackend(job, dir) {
       process.removeListener("SIGTERM", stop);
       process.removeListener("SIGINT", stop);
       fs.closeSync(log);
+      if (autoUnavailable && !stopped && !timedOut) {
+        resolve({ ok: false, autoUnavailable: true, error: "Antigravity auto mode is not available for this account." });
+        return;
+      }
       if (timedOut) {
         resolve({ ok: false, error: `${inv.bin} did not finish within ${job.request.timeout}. Retry with a larger --timeout, for example --timeout 2h.` });
         return;
@@ -600,6 +619,12 @@ async function executeJob(dir, job) {
   saveJob(dir, job);
   const started = Date.now();
   let result = await runBackend(job, dir);
+  if (result.autoUnavailable && loadJob(dir, job.id)?.status !== "cancelled") {
+    writeJson(defaultsFile(), { ...readJson(defaultsFile(), {}), autoModeUnavailable: true });
+    job.permission = "accept-edits";
+    saveJob(dir, job);
+    result = await runBackend(job, dir);
+  }
   const remainingMs = durationMs(job.request.timeout) - (Date.now() - started);
   const retry =
     job.backend === "agy" && result.ok && !result.text && result.structured == null &&
@@ -727,7 +752,7 @@ function resumeCandidate(dir, backend) {
 async function cmdTask(args) {
   const { opts, rest } = parseFlags(args, {
     flags: ["background", "write", "resume", "fresh", "json", "stdin"],
-    values: ["backend", "model", "effort", "timeout", "prompt-file", "conversation"]
+    values: ["backend", "model", "effort", "timeout", "prompt-file", "conversation", "permission", "add-dir"]
   });
   let prompt = rest.join(" ").trim();
   if (opts["prompt-file"]) prompt = fs.readFileSync(opts["prompt-file"], "utf8");
@@ -749,6 +774,8 @@ async function cmdTask(args) {
     prompt = "Continue from where we left off. Pick the most valuable next step and finish it.";
   }
   const choice = resolveModel(backend, opts.model, opts.effort || null);
+  const permission = resolvePermission(opts.permission);
+  if (opts["add-dir"] && !fs.statSync(path.resolve(opts["add-dir"]), { throwIfNoEntry: false })?.isDirectory()) fail(`--add-dir ${opts["add-dir"]} is not a folder.`);
   if (opts.timeout) durationMs(opts.timeout);
   const { job } = createJob(cwd, {
     kind: "task",
@@ -758,7 +785,8 @@ async function cmdTask(args) {
     model: choice.model,
     effort: choice.effort,
     write: Boolean(opts.write),
-    request: { prompt, resume, timeout: opts.timeout || JOB_TIMEOUT }
+    permission: opts.write ? permission : null,
+    request: { prompt, resume, timeout: opts.timeout || JOB_TIMEOUT, addDirs: opts["add-dir"] ? [path.resolve(opts["add-dir"])] : [] }
   });
   await launch(dir, job, opts.background);
 }
@@ -874,7 +902,7 @@ async function cmdStatus(args) {
     if (opts.json) return void process.stdout.write(JSON.stringify(job, null, 2) + "\n");
     const lines = [
       `Job ${job.id}`,
-      `Kind: ${job.kind} · ${backendLabel(job)}${job.write ? " · write" : " · read-only"}`,
+      `Kind: ${job.kind} · ${backendLabel(job)}${job.write ? ` · write${job.permission ? ` (${job.permission})` : ""}` : " · read-only"}`,
       `Status: ${job.status} · ${elapsed(job)}${job.steps ? ` · ${job.steps} steps` : ""}`,
       ...(isActive(job) && job.progress ? [`Now: ${job.progress.text} (${elapsed({ startedAt: job.progress.at })} ago)`] : []),
       `Summary: ${job.summary}`
@@ -1039,11 +1067,12 @@ function checkGemini() {
 async function cmdSetup(args) {
   const { opts } = parseFlags(argsFrom(args), {
     flags: ["json", "enable-review-gate", "disable-review-gate", "reset-defaults", "install-agy"],
-    values: ["model", "effort"],
+    values: ["model", "effort", "permission"],
     anywhere: true
   });
   if (opts["enable-review-gate"] && opts["disable-review-gate"]) fail("Choose only one of --enable-review-gate and --disable-review-gate.");
   if (opts.effort && !AGY_EFFORTS.includes(opts.effort)) fail(`--effort must be one of: ${AGY_EFFORTS.join(", ")}.`);
+  resolvePermission(opts.permission);
   const dir = stateDir(workspaceRoot(process.cwd()));
   const config = loadConfig(dir);
   const actions = [];
@@ -1070,7 +1099,7 @@ async function cmdSetup(args) {
   const gemini = checkGemini();
   if (opts["reset-defaults"]) {
     fs.rmSync(defaultsFile(), { force: true });
-    actions.push("Saved model and effort defaults removed; agy's own account default is used.");
+    actions.push("Saved model, effort and permission defaults removed; agy's own account default and auto permission are used.");
   }
   if (opts.model || opts.effort) {
     if (!agy.ready) fail("agy is not ready, so the model cannot be checked. Fix the agy setup first.");
@@ -1094,8 +1123,12 @@ async function cmdSetup(args) {
     if (effort && !family.efforts.includes(effort)) {
       fail(`${family.model} has no "${effort}" effort ${family.efforts.length ? `(available: ${family.efforts.join(", ")})` : "(it has no effort levels)"}.`);
     }
-    writeJson(defaultsFile(), effort ? { model: family.model, effort } : { model: family.model });
+    writeJson(defaultsFile(), { permission: saved.permission, autoModeUnavailable: saved.autoModeUnavailable, model: family.model, effort: effort || undefined });
     actions.push(`Saved default for all projects: ${family.model}${effort ? ` · effort ${effort}` : ""}.`);
+  }
+  if (opts.permission) {
+    writeJson(defaultsFile(), { ...readJson(defaultsFile(), {}), permission: opts.permission, autoModeUnavailable: opts.permission === "auto" ? undefined : readJson(defaultsFile(), {}).autoModeUnavailable });
+    actions.push(`Saved write permission for all projects: ${opts.permission}.`);
   }
   const savedNow = readJson(defaultsFile(), {});
   const savedFamily = agy.families?.find((f) => f.model === savedNow.model);
@@ -1109,6 +1142,7 @@ async function cmdSetup(args) {
     defaultBackend: resolveBackend(),
     defaultModel: choice.model || null,
     defaultEffort: choice.effort,
+    defaultPermission: resolvePermission(null),
     stopReviewGate: config.stopReviewGate,
     actions,
     nextSteps: [
@@ -1125,6 +1159,7 @@ async function cmdSetup(args) {
     ...(agy.families || []).map((f) => `    ${f.model}${f.efforts.length ? ` (effort: ${f.efforts.join(", ")})` : ""} — ${f.name}`),
     `- gemini: ${gemini.detail}${gemini.version ? ` (v${gemini.version})` : ""}`,
     `- Default for all projects: ${report.defaultBackend} · ${report.defaultModel || "agy account default model"}${report.defaultEffort ? ` · effort ${report.defaultEffort}` : ""}`,
+    `- Write permission for all projects: ${report.defaultPermission}${savedNow.autoModeUnavailable && (savedNow.permission || "auto") === "auto" ? " (auto mode is not available on this account)" : ""}`,
     `- Stop review gate: ${config.stopReviewGate ? "on" : "off"}`,
     ...actions.map((a) => `- ${a}`)
   ];
@@ -1276,3 +1311,10 @@ main().catch((err) => {
   process.stderr.write(`${err instanceof UserError ? err.message : err.stack || err}\n`);
   process.exitCode = 1;
 });
+
+function resolvePermission(permission) {
+  if (permission && !AGY_PERMISSIONS.includes(permission)) fail(`--permission must be one of: ${AGY_PERMISSIONS.join(", ")}.`);
+  const saved = readJson(defaultsFile(), {});
+  const chosen = permission || saved.permission || "auto";
+  return !permission && chosen === "auto" && saved.autoModeUnavailable ? "accept-edits" : chosen;
+}

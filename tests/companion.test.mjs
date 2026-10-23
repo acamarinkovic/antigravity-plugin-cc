@@ -71,12 +71,13 @@ test("read-only question uses plan mode and sandbox, and leaves the model to agy
   assert.equal(flag(c.args, "--print-timeout"), "60m");
 });
 
-test("--write switches to accept-edits and --effort strips the model effort suffix", () => {
+test("--write uses auto mode by default and --effort strips the model effort suffix", () => {
   const box = sandbox();
   const r = run(box, ["task", "--write", "--model", "gemini-4-argon-high", "--effort", "max", "--", "fix it"]);
   assert.equal(r.status, 0, r.stderr);
   const [c] = calls(box);
-  assert.equal(flag(c.args, "--mode"), "accept-edits");
+  assert.equal(flag(c.args, "--mode"), "auto");
+  assert.ok(c.args.includes("--sandbox"));
   assert.equal(flag(c.args, "--model"), "gemini-4-argon");
   assert.equal(flag(c.args, "--effort"), "max");
 });
@@ -388,7 +389,7 @@ test("write jobs get the write variant of the headless note, read-only jobs the 
   run(box, ["task", "--write", "--", "fix"]);
   run(box, ["task", "--", "look"]);
   const [w, ro] = calls(box);
-  assert.match(flag(w.args, "-p"), /^Headless session: you may edit files directly/);
+  assert.match(flag(w.args, "-p"), /^Headless session: you may edit files directly\. Terminal commands run only when agy's auto mode allows them/);
   assert.match(flag(ro.args, "-p"), /^Headless, read-only session/);
 });
 
@@ -623,4 +624,77 @@ test("a stale ANTIGRAVITY_AGY_BIN is named when the installer succeeded elsewher
   fs.writeFileSync(path.join(bin, "curl"), ["#!/bin/sh", 'echo \'mkdir -p "$HOME/.local/bin"; printf "#!/bin/sh\\nexit 0\\n" > "$HOME/.local/bin/agy"; chmod +x "$HOME/.local/bin/agy"\'', ""].join("\n"), { mode: 0o755 });
   const r = run(box, ["setup", "--install-agy"], { ...env, ANTIGRAVITY_AGY_BIN: "/nonexistent/agy" });
   assert.match(r.stdout, /but ANTIGRAVITY_AGY_BIN points to \/nonexistent\/agy/);
+});
+
+test("when auto mode is not available, the task reruns with accept-edits and later tasks skip auto", () => {
+  const box = sandbox();
+  const r = run(box, ["task", "--write", "--", "fix"], { FAKE_MODE: "no-auto" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /answer to: fix/);
+  run(box, ["task", "--write", "--", "again"], { FAKE_MODE: "no-auto" });
+  assert.deepEqual(calls(box).map((c) => flag(c.args, "--mode")), ["auto", "accept-edits", "accept-edits"]);
+  assert.match(run(box, ["setup"]).stdout, /Write permission for all projects: accept-edits \(auto mode is not available on this account\)/);
+});
+
+test("setup --permission dangerous skips agy permissions for write tasks only", () => {
+  const box = sandbox();
+  const s = run(box, ["setup", "--permission dangerous"]);
+  assert.match(s.stdout, /Saved write permission for all projects: dangerous/);
+  run(box, ["task", "--write", "--", "fix"]);
+  run(box, ["task", "--", "look"]);
+  const [w, ro] = calls(box);
+  assert.ok(w.args.includes("--dangerously-skip-permissions"));
+  assert.ok(!w.args.includes("--sandbox"));
+  assert.equal(flag(w.args, "--mode"), undefined);
+  assert.match(flag(w.args, "-p"), /^Headless session: you may edit files and run terminal commands/);
+  assert.equal(flag(ro.args, "--mode"), "plan");
+  assert.ok(ro.args.includes("--sandbox"));
+});
+
+test("--permission on a task overrides the saved one, and an unknown value is rejected", () => {
+  const box = sandbox();
+  run(box, ["setup", "--permission dangerous"]);
+  run(box, ["task", "--write", "--permission", "accept-edits", "--", "fix"]);
+  assert.equal(flag(calls(box)[0].args, "--mode"), "accept-edits");
+  const bad = run(box, ["task", "--write", "--permission", "yolo", "--", "fix"]);
+  assert.equal(bad.status, 1);
+  assert.match(bad.stderr, /--permission must be one of: auto, accept-edits, dangerous/);
+  assert.equal(calls(box).length, 1);
+});
+
+test("saving a model keeps the saved permission", () => {
+  const box = sandbox();
+  run(box, ["setup", "--permission dangerous"]);
+  run(box, ["setup", "--model flash-x --effort high"]);
+  const report = JSON.parse(run(box, ["setup", "--json"]).stdout);
+  assert.equal(report.defaultPermission, "dangerous");
+  assert.equal(report.defaultModel, "flash-x");
+});
+
+test("--add-dir gives agy access to another folder", () => {
+  const box = sandbox();
+  const extra = path.join(box.root, "extra");
+  fs.mkdirSync(extra);
+  run(box, ["task", "--add-dir", extra, "--", "look"]);
+  assert.equal(flag(calls(box)[0].args, "--add-dir"), extra);
+});
+
+test("setup --permission auto clears the remembered missing auto mode, and a failed setup saves no permission", () => {
+  const box = sandbox();
+  run(box, ["task", "--write", "--", "fix"], { FAKE_MODE: "no-auto" });
+  const bad = run(box, ["setup", "--permission dangerous --model nope"]);
+  assert.equal(bad.status, 1);
+  assert.equal(JSON.parse(run(box, ["setup", "--json"]).stdout).defaultPermission, "accept-edits");
+  run(box, ["setup", "--permission auto"]);
+  run(box, ["task", "--write", "--", "again"]);
+  assert.equal(flag(calls(box).at(-1).args, "--mode"), "auto");
+  assert.match(flag(calls(box).at(-1).args, "-p"), /^Headless session: you may edit files directly\. Terminal commands run only when agy's auto mode allows them/);
+});
+
+test("--add-dir must be an existing folder", () => {
+  const box = sandbox();
+  const r = run(box, ["task", "--add-dir", path.join(box.root, "missing"), "--", "look"]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /is not a folder/);
+  assert.equal(calls(box).length, 0);
 });

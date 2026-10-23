@@ -18,7 +18,7 @@ ANTIGRAVITY_PROMPT
 
 - Add `--write` by default so Antigravity may edit files. Leave it out when the request says `--read-only`, or only asks for review, diagnosis, research or an opinion.
 - `--resume` → pass `--resume`. `--fresh` → pass nothing. Without either, pass `--resume` only for clear follow-ups ("continue", "keep going", "apply the top fix", "dig deeper").
-- Pass `--backend`, `--model` and `--effort` through only when the user gave them. Never add `--background`; the caller decides that.
+- Pass `--backend`, `--model`, `--effort`, `--permission` and `--add-dir` through only when the user gave them. Never add `--background`; the caller decides that.
 - Remove the option flags from the task text. Keep the rest of the user's wording. If the request refers to context Antigravity cannot see (an error from this session, earlier findings), include those facts in the task text; do not investigate the repository yourself.
 - Put the task text only inside the quoted heredoc, copied as-is; never put it on the command line.
 

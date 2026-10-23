@@ -28,6 +28,7 @@ Accounts differ, so nothing is hard-coded: until you choose, the plugin lets `ag
 /antigravity:setup --choose                              # pick from your account's models interactively
 /antigravity:setup --model gemini-4-argon --effort high  # or set it directly
 /antigravity:setup --reset-defaults                      # back to agy's account default
+/antigravity:setup --permission dangerous                # write tasks skip agy's permission checks
 ```
 
 `setup` checks the model against `agy models` before saving it. `--model` and `--effort` on a single command still override the saved default. Every answer ends with the model that actually ran.
@@ -43,7 +44,7 @@ Accounts differ, so nothing is hard-coded: until you choose, the plugin lets `ag
 | `/antigravity:status [job] [--wait] [--all]` | Lists running and recent jobs, or shows one job in detail. |
 | `/antigravity:result [job]` | Prints the stored answer of a finished job. |
 | `/antigravity:cancel [job]` | Stops a running job. |
-| `/antigravity:setup [--choose\|--model <id> --effort <level>\|--reset-defaults] [--enable-review-gate\|--disable-review-gate]` | Checks the installation and sign-in, offers to install `agy` when it is missing (only after you agree), saves your default model and thinking level, and turns the stop review gate on or off. |
+| `/antigravity:setup [--choose\|--model <id> --effort <level>\|--reset-defaults] [--permission auto\|accept-edits\|dangerous] [--enable-review-gate\|--disable-review-gate]` | Checks the installation and sign-in, offers to install `agy` when it is missing (only after you agree), saves your default model, thinking level and write permission, and turns the stop review gate on or off. |
 
 Common options (they go before the question or focus text):
 
@@ -69,9 +70,11 @@ Examples:
 | Mode | Reads repo files | Edits files | Runs shell commands |
 |---|---|---|---|
 | ask, review, adversarial-review, stop gate | yes | no (agy `--mode plan --sandbox`, gemini `--approval-mode plan`) | no |
-| rescue (default) | yes | yes (agy `--mode accept-edits`, gemini `--approval-mode auto_edit`) | no |
+| rescue (default `--permission auto`) | yes | yes (agy `--mode auto --sandbox`; falls back to `--mode accept-edits` when the account has no auto mode) | only what agy's auto mode allows |
+| rescue `--permission accept-edits` | yes | yes (agy `--mode accept-edits --sandbox`, gemini `--approval-mode auto_edit`) | no |
+| rescue `--permission dangerous` | yes | yes (agy `--dangerously-skip-permissions`, gemini `--approval-mode yolo`) | yes, without asking |
 
-Headless `agy` cannot ask for permission, so any shell command it tries is denied automatically, and the denial ends its turn. The plugin therefore tells Antigravity up front that commands are unavailable. If a turn still ends empty because of a blocked command, the plugin resumes the same conversation once and asks for the answer without commands. The answer lists what was blocked. To allow specific commands, add allow-rules such as `command(npm test)` under `permissions.allow` in `~/.gemini/antigravity-cli/settings.json`. This plugin never passes `--dangerously-skip-permissions`, `--yolo` or `--skip-trust`. Gemini CLI keeps its folder-trust check, so it does not load a repository's own `.gemini/settings.json` (MCP servers, hooks) until you trust that folder in Gemini CLI yourself.
+Headless `agy` cannot ask for permission, so any shell command it tries is denied automatically, and the denial ends its turn. The plugin therefore tells Antigravity up front which commands it may run: none in `accept-edits`, only what auto mode allows in `auto`, all of them in `dangerous`. If a turn still ends empty because of a blocked command, the plugin resumes the same conversation once and asks for the answer without commands. The answer lists what was blocked. To allow specific commands, add allow-rules such as `command(npm test)` under `permissions.allow` in `~/.gemini/antigravity-cli/settings.json`. The write permission is `auto` unless you save another one with `/antigravity:setup --permission <mode>` or pass `--permission <mode>` to a single rescue; `dangerous` is never used unless you choose it, and read-only modes always stay in plan mode. When `auto` is not available on your account, the plugin reruns the task with `accept-edits` and remembers that for later tasks. `--add-dir <path>` on a rescue gives Antigravity access to one more folder. The plugin never passes `--skip-trust`. Gemini CLI keeps its folder-trust check, so it does not load a repository's own `.gemini/settings.json` (MCP servers, hooks) until you trust that folder in Gemini CLI yourself.
 
 User text (questions, review focus) is handed to the script through a quoted heredoc or stdin, never interpolated into a shell command line.
 

@@ -11,6 +11,11 @@ if (args[0] === "models") {
   process.stdout.write("Fetching available models...\nflash-x-high\tFlash X (High)\nflash-x-low\tFlash X (Low)\npro-y-medium\tPro Y (Medium)\nsolo-z\tSolo Z\n");
   process.exit(0);
 }
+if (process.env.FAKE_MODE === "no-auto" && args[args.indexOf("--mode") + 1] === "auto") {
+  process.stderr.write("warning: --mode auto is not available for this account; continuing in the default mode.\n");
+  setTimeout(() => {}, 60000);
+  return;
+}
 const mode = process.env.FAKE_MODE || "ok";
 if (args.includes("--log-file") && mode !== "no-label") {
   const chosen = args.includes("--model") ? args[args.indexOf("--model") + 1] : "Account Default";
